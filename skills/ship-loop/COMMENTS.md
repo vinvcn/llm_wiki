@@ -43,6 +43,7 @@ Pushed as <commit-sha(s)>.
 
 - Standards axis: <n findings, most severe>
 - Spec axis: <n findings, most severe>
+- OCR rules: <n findings, most severe>
 - Critical/High: <list, or "none">
 - Medium/Low (deferred → <ticket>): <list, or "none">
 

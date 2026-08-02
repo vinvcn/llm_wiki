@@ -6,7 +6,7 @@ argument-hint: "What feature/fix should the loop ship? (optional: scope or accep
 
 # Ship Loop
 
-Two nested loops plus a CI gate, each stage ending in a **gate** — a binary
+Two nested loops plus a CI gate. Three stages end in a **gate** — a binary
 pass/fail that decides where control flows next. A change ships only when it
 clears all three: review, CI, and validation. The two cheap gates (review, CI)
 run before the expensive validation fleet.
@@ -15,9 +15,9 @@ run before the expensive validation fleet.
   0. PLAN ──► ┌──────────── INNER LOOP (tight) ────────────┐
   validation  │                                            │
   plan, once; │   1. IMPLEMENT ──────► 2. REVIEW           │
-  re-eval'd   │     ▲ open/update PR,     │                │
-  at each     │     │ commit + push       │ review gate    │
-  validation  │     │                     ▼                │
+  re-eval'd   │     open/update PR,       │                │
+  at each     │     commit + push         │ review gate    │
+  validation  │     ▲                     ▼                │
   gate        │     └────── fail ──── pass ──► to step 3   │
               └────────────────────────────────────────────┘
                                         │
@@ -45,9 +45,9 @@ run before the expensive validation fleet.
 **Two rules that never change:**
 - **The PR is live from step 0.** The PR is opened in step 0 and updated (commit
   + push) every iteration — work is never held locally until the end.
-- **Every gate is a GitHub comment.** The plan, each review result, each
-  validation result, and the ship note are posted to the PR, so the record of
-  why it shipped lives on the PR, not in chat. Comment shapes in
+- **Every gate is a GitHub comment.** The plan, each review result, each CI
+  result, each validation result, and the ship note are posted to the PR, so the
+  record of why it shipped lives on the PR, not in chat. Comment shapes in
   [`COMMENTS.md`](COMMENTS.md).
 
 ---
@@ -80,8 +80,8 @@ gate (step 4 owns that re-evaluation).
 
 ## 1. Implement (commit · push · keep the PR current)
 
-Implement the change (use `/tdd` at pre-agreed seams where it fits; typecheck and
-run targeted tests as you go).
+Implement the change (use `/tdd` at seams you and the user agreed to test-first;
+typecheck and run targeted tests as you go).
 
 Then, **every iteration**:
 - **update the PR** opened in step 0 if the change needs its context refreshed;
@@ -125,18 +125,21 @@ gate verdict (shape in [`COMMENTS.md`](COMMENTS.md)).
 
 Mark the PR ready (if it was draft) and confirm the **CI gate is green**.
 
+**Post the CI result as a GitHub comment** — green/red summary and the gate
+verdict (shape in [`COMMENTS.md`](COMMENTS.md)).
+
 **Gate (binary):**
 - **pass** = CI green → advance to step 4.
 - **fail** = CI red → return to step 1 and fix.
 
-**Completion criterion:** CI is green.
+**Completion criterion:** the CI comment is posted and CI is green.
 
 ## 4. User-validate (outer gate)
 
 **Re-evaluate the plan first.** For the changes introduced since the last
 validation, confirm the step-0 plan still covers them: add scenarios for new
 surface, drop any now-irrelevant, leave the rest. Post the re-evaluation as a
-comment (delta from the prior plan, or "unchanged").
+comment (delta from the prior plan, or "Plan unchanged").
 
 **Build/reuse a Playwright harness** that:
 - launches an **isolated app instance per scenario** (own port + data dir) so
@@ -194,10 +197,10 @@ If `/tdd`, `/code-review`, or `/open-code-review-delegate` are unavailable, the 
 
 - **Why two loops.** "Tests pass" and "review clean" both ≠ "works for a user."
   The validation gate has caught bugs unit tests and review missed (a dialog that
-  silently disabled a button; an auth mode that locked users out). Review and CI
-  are the *tight* inner gates because they're cheap; validation is the *outer*
-  gate because it's expensive — you only pay for the fleet once review and CI
-  already pass.
+  silently disabled a button; an auth mode that locked users out). Review is the
+  *tight* inner loop because it's cheap; CI is also cheap and runs right after
+  the loop exits; validation is the *outer* gate because it's expensive — you
+  only pay for the fleet once review and CI already pass.
 - **Cost scales with risk.** A one-line fix needs one scenario and a light
   review; a migration needs a full fleet and split-axis review. Scale the fan-out
   to the blast radius of the change.
