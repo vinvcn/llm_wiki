@@ -3,7 +3,7 @@
 Templates for the PR comments each gate posts. Keep them short and factual —
 they are the durable record of *why* the change shipped. Post with
 `gh pr comment <n> --body "…"`. Replace `<n>` with the PR number (open the PR in
-step 1 if it doesn't exist yet).
+step 0 if it doesn't exist yet).
 
 ## Step 0 — Validation plan
 
@@ -14,7 +14,7 @@ Scenarios to prove this works for a real user (re-evaluated at each validation g
 
 1. **<journey name>** — route: `<entry point>`
    steps: <what the user does>
-   proves success when: <observable DOM text / artifact / network response>
+   proves success when: <observable DOM text / console message / network response / dialog event>
 2. …
 
 Coverage: happy path ✅ · touched flows ✅ · error/edge path ✅
@@ -65,12 +65,11 @@ Harness artifacts (not bugs): <list, or "none">
 Gate: <PASS — advancing to ship | FAIL — returning to implement>.
 ```
 
-## Step 4 — Ship
+## Step 5 — Ship
 
 ```markdown
 ## Shipped ✅
 
-Cleared: review gate (PASS) → user-validation gate (PASS, <n>/<n> scenarios).
-CI: <green summary>.
+Cleared: review gate (PASS) → user-validation gate (PASS, <n>/<n> scenarios) → CI gate (PASS).
 Deferred follow-ups: <ticket links, or "none">.
 ```
