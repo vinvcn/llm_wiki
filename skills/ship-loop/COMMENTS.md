@@ -20,7 +20,7 @@ Scenarios to prove this works for a real user (re-evaluated at each validation g
 Coverage: happy path ✅ · touched flows ✅ · error/edge path ✅
 ```
 
-On **re-evaluation** (step 3), post the delta instead of the full list:
+On **re-evaluation** (step 4), post the delta instead of the full list:
 `Added: <n> (<why>). Dropped: <n> (<why>). Unchanged: <n>.` — or "Plan unchanged."
 
 ## Step 1 — Addressing findings (only when fixing review/validation findings)
@@ -46,10 +46,20 @@ Pushed as <commit-sha(s)>.
 - Critical/High: <list, or "none">
 - Medium/Low (deferred → <ticket>): <list, or "none">
 
+Gate: <PASS — advancing to CI | FAIL — returning to implement>.
+```
+
+## Step 3 — CI result
+
+```markdown
+## CI — <PASS | FAIL>
+
+<CI summary: checks run, green/red>.
+
 Gate: <PASS — advancing to user validation | FAIL — returning to implement>.
 ```
 
-## Step 3 — Validation result
+## Step 4 — Validation result
 
 ```markdown
 ## User validation — <PASS | FAIL>
@@ -70,6 +80,6 @@ Gate: <PASS — advancing to ship | FAIL — returning to implement>.
 ```markdown
 ## Shipped ✅
 
-Cleared: review gate (PASS) → user-validation gate (PASS, <n>/<n> scenarios) → CI gate (PASS).
+Cleared: review gate (PASS) → CI gate (PASS) → user-validation gate (PASS, <n>/<n> scenarios).
 Deferred follow-ups: <ticket links, or "none">.
 ```

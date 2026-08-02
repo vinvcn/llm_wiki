@@ -1,14 +1,15 @@
 ---
 name: ship-loop
-description: Drive a change to shipped through three gates — an inner implement↔review loop, a real-user-validation gate, and a CI gate, each rolling back to implement on failure — recording each gate as a GitHub comment and opening the PR in step 0, not at the end. Fans out subagents at every stage (parallel implementation, a planning agent, a Playwright fleet of one-agent-per-scenario, parallel review axes). Use when the user says "ship loop", "run the loop", "implement and validate", "validate it like a real user", or asks to build/fix a feature and prove it works in the real app before shipping.
+description: Drive a change to shipped through three gates — an inner implement↔review loop, a CI gate, and a real-user-validation gate, each rolling back to implement on failure — recording each gate as a GitHub comment and opening the PR in step 0, not at the end. Fans out subagents at every stage (parallel implementation, a planning agent, a Playwright fleet of one-agent-per-scenario, parallel review axes). Use when the user says "ship loop", "run the loop", "implement and validate", "validate it like a real user", or asks to build/fix a feature and prove it works in the real app before shipping.
 argument-hint: "What feature/fix should the loop ship? (optional: scope or acceptance criteria)"
 ---
 
 # Ship Loop
 
-Two nested loops plus a final CI gate, each stage ending in a **gate** — a
-binary pass/fail that decides where control flows next. A change ships only when
-it clears all three: review, validation, and CI.
+Two nested loops plus a CI gate, each stage ending in a **gate** — a binary
+pass/fail that decides where control flows next. A change ships only when it
+clears all three: review, CI, and validation. The two cheap gates (review, CI)
+run before the expensive validation fleet.
 
 ```
   0. PLAN ──► ┌──────────── INNER LOOP (tight) ────────────┐
@@ -21,25 +22,25 @@ it clears all three: review, validation, and CI.
               └────────────────────────────────────────────┘
                                         │
                                         ▼
-                              3. USER-VALIDATE (run the plan)
+                                      3. CI GATE
+                                  fail ───┤─── pass
+                                    │           │
+                         (→ back to IMPLEMENT)  ▼
+                              4. USER-VALIDATE (run the plan)
                                         │ validation gate
                               fail ─────┤───── pass
                                 │                │
                      (→ back to IMPLEMENT)       ▼
-                                            4. CI GATE
-                                        fail ───┤─── pass
-                                          │           │
-                               (→ back to IMPLEMENT)  ▼
-                                                  5. SHIP
+                                              5. SHIP
 ```
 
 **Transitions (the whole contract):**
 - review **fail** → IMPLEMENT
-- review **pass** → USER-VALIDATE
-- validation **fail** → IMPLEMENT (re-enter the inner loop)
-- validation **pass** → CI
+- review **pass** → CI
 - CI **fail** → IMPLEMENT (re-enter the inner loop)
-- CI **pass** → SHIP
+- CI **pass** → USER-VALIDATE
+- validation **fail** → IMPLEMENT (re-enter the inner loop)
+- validation **pass** → SHIP
 
 **Two rules that never change:**
 - **The PR is live from step 0.** The PR is opened in step 0 and updated (commit
@@ -63,7 +64,7 @@ A plan is a list of **user journeys, not assertions**. Each scenario names:
 - the **steps** a real user takes — the set as a whole covers the happy path, the
   flows the change touches, and at least one error/edge path;
 - the **observable outcome** that proves success, drawn from the evidence the
-  harness collects in step 3 (DOM text, console messages, network responses,
+  harness collects in step 4 (DOM text, console messages, network responses,
   dialog events) — never pixels.
 
 Scenarios are **deduped**: each owns one distinct user goal.
@@ -75,7 +76,7 @@ how to test) and **post the plan as a GitHub comment** on it (shape in
 **Completion criterion:** every user-facing behavior the change introduces or
 touches is covered by exactly one scenario, the PR exists, and the plan is
 posted. The plan is re-evaluated each time control returns to the validation
-gate (step 3 owns that re-evaluation).
+gate (step 4 owns that re-evaluation).
 
 ## 1. Implement (commit · push · keep the PR current)
 
@@ -120,7 +121,17 @@ gate verdict (shape in [`COMMENTS.md`](COMMENTS.md)).
 
 **Completion criterion:** the review comment is posted and states pass or fail.
 
-## 3. User-validate (outer gate)
+## 3. CI gate
+
+Mark the PR ready (if it was draft) and confirm the **CI gate is green**.
+
+**Gate (binary):**
+- **pass** = CI green → advance to step 4.
+- **fail** = CI red → return to step 1 and fix.
+
+**Completion criterion:** CI is green.
+
+## 4. User-validate (outer gate)
 
 **Re-evaluate the plan first.** For the changes introduced since the last
 validation, confirm the step-0 plan still covers them: add scenarios for new
@@ -148,21 +159,11 @@ result as a GitHub comment** — per-scenario verdicts + evidence (shape in
 [`COMMENTS.md`](COMMENTS.md)).
 
 **Gate (binary):**
-- **pass** = every scenario passed → advance to step 4.
+- **pass** = every scenario passed → advance to step 5.
 - **fail** = any genuine failure → return to step 1 (re-enter the inner loop).
 
 **Completion criterion:** the validation comment is posted, every scenario has a
 verdict, and the gate states pass or fail.
-
-## 4. CI gate
-
-Mark the PR ready (if it was draft) and confirm the **CI gate is green**.
-
-**Gate (binary):**
-- **pass** = CI green → advance to step 5.
-- **fail** = CI red → return to step 1 and fix.
-
-**Completion criterion:** CI is green.
 
 ## 5. Ship
 
@@ -180,9 +181,10 @@ Never push to main, force-push, or merge — those are the user's calls.
 
 - **Why two loops.** "Tests pass" and "review clean" both ≠ "works for a user."
   The validation gate has caught bugs unit tests and review missed (a dialog that
-  silently disabled a button; an auth mode that locked users out). Review is the
-  *tight* inner loop because it's cheap; validation is the *outer* gate because
-  it's expensive — you only pay for the fleet once review already passes.
+  silently disabled a button; an auth mode that locked users out). Review and CI
+  are the *tight* inner gates because they're cheap; validation is the *outer*
+  gate because it's expensive — you only pay for the fleet once review and CI
+  already pass.
 - **Cost scales with risk.** A one-line fix needs one scenario and a light
   review; a migration needs a full fleet and split-axis review. Scale the fan-out
   to the blast radius of the change.
