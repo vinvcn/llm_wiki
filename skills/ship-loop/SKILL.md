@@ -177,6 +177,19 @@ Never push to main, force-push, or merge — those are the user's calls.
 
 ---
 
+## Related Skills
+
+This workflow invokes or extends the following skills:
+
+- **`/implement`** — this workflow extends `/implement`'s loop (implement → code-review → commit) by adding validation and CI gates. Step 1 does the same work `/implement` would, but the ship-loop controls when it runs and what gates it must clear.
+- **`/tdd`** — step 1 invokes this at pre-agreed seams to write tests before implementation.
+- **`/code-review`** — step 2 runs this to execute the Standards + Spec axes review as parallel subagents.
+- **`/open-code-review-delegate`** — step 2 runs this for OCR rule-based review (preview → rule → review each file against its rules).
+
+If `/tdd`, `/code-review`, or `/open-code-review-delegate` are unavailable, the corresponding step degrades (implement without test-first; review without one or both axes).
+
+---
+
 ## Notes
 
 - **Why two loops.** "Tests pass" and "review clean" both ≠ "works for a user."
