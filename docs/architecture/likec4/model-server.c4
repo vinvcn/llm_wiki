@@ -1,0 +1,174 @@
+// Node server containers (packages/server). Two entries exist in code:
+// index-v2.js (Express 5, /api/v2 — web/Docker mode) and index.js (raw
+// node:http, /api/v1 + /api/commands — legacy). Evidence: packages/server/src.
+
+model {
+
+  extend llmWiki {
+
+    nodeServer = service 'Node Server (web mode) :3000 docker / :19828 dev' {
+      description 'Express 5 backend of the web deployment: serves the dist-web SPA and the /api/v2 REST + SSE API. Started by npm run start:web and by Docker (CMD node packages/server/src/index-v2.js). Boots SQLite, ingest orchestrator and chunked-upload sweeper.'
+      technology 'Express 5 · helmet · cors · Zod validation via @llm-wiki/api-types'
+      metadata {
+        evidence 'packages/server/src/index-v2.js (boot block incl. startIngestOrchestrator, startChunkedUploadSweeper) · Dockerfile · runtime banner "LLM Wiki server v2 (Express + Zod)"'
+      }
+
+      httpSurface = component 'HTTP surface & middleware [LIVE]' {
+        description 'Chain: cors -> helmet(CSP off) -> /api/proxy inline auth -> express.json(64mb) -> authMiddleware -> routers -> error envelope. Public paths: /api/v2/health, /api/v2/version, /api/v2/auth/login, /api/v2/auth/status. Auth modes: none/open | token | auto (default); token via ?token=, x-llm-wiki-token header, or Bearer; env LLM_WIKI_AUTH_MODE / LLM_WIKI_API_TOKEN.'
+        technology 'middleware/auth.js · error.js · project-lookup.js · validate.js · auth/config.js'
+      }
+
+      apiProjects = component 'Projects & files API' {
+        description 'Projects CRUD (+scaffold with schema.md guard), file tree/content/download/raw, single-shot base64 upload, chunked upload protocol (init/offset-validated chunk/complete; staging DATA_DIR/upload-staging, 24h TTL, boot wipe).'
+        technology '/api/v2/projects* · /api/v2/projects/:id/files*'
+        metadata {
+          evidence 'api/projects.js · api/files.js · uploads/chunked.js'
+        }
+      }
+
+      apiChat = component 'Chat API' {
+        description 'POST chat (ChatRequestSchema: message, sessionId?, mode standard|deep, tools{wiki,web,anytxt}, topK, skills, resume/regenerate, historyLimit) returns {runId, sessionId}; cancel; chat/writes (Write-to-Wiki via streamChat writing FILE blocks); session CRUD (list/create/detail/rename/delete).'
+        technology '/api/v2/projects/:id/chat*'
+        metadata {
+          evidence 'api/chat.js · packages/api-types/src/schemas/chat.ts'
+        }
+      }
+
+      apiSearch = component 'Search & graph API' {
+        description 'POST search (query, topK<=100, includeContent; mode NOT taken from the request — resolved from app-state wikiSearchMode, default hybrid) -> {results, mode, tokenHits, vectorHits, graphHits, vectorUnavailableReason?}. GET graph -> {nodes, edges} wikilink snapshot with nodeType/q/limit filters.'
+        technology '/api/v2/projects/:id/search · /graph'
+        metadata {
+          evidence 'api/search.js · api/graph.js · commands/search.js:243-248'
+        }
+      }
+
+      apiIngest = component 'Ingest API' {
+        description 'Multipart upload (multer memory, cap MAX_UPLOAD_BYTES default 50MB via LLM_WIKI_MAX_UPLOAD_MB) into raw/sources then enqueue; enqueue-by-path with live-task dedupe; queue list/detail/clear/retry/cancel. Routes only insert rows + kick the orchestrator — they never run the pipeline.'
+        technology '/api/v2/projects/:id/ingest*'
+        metadata {
+          evidence 'api/ingest.js · config.js:27-37'
+        }
+      }
+
+      apiOps = component 'Reviews · maintenance · settings · auth · store API' {
+        description 'Reviews read from .llm-wiki/review.json; maintenance: rebuild wiki/index.md, export/import archive, file-history list/restore; settings GET/POST/PUT/DELETE over the shared store (locked RMW); auth status/login; /api/store/:name[/:key] plugin-store ops.'
+        technology '/api/v2/projects/:id/reviews · /maintenance/* · /api/v2/settings* · /api/v2/auth* · /api/store'
+        metadata {
+          evidence 'api/reviews.js · api/maintenance.js · api/settings.js · api/auth.js · api/store.js'
+        }
+      }
+
+      eventsSse = component 'Events / SSE [LIVE addSseClient · sse.js dormant]' {
+        description 'Single global stream GET /api/v2/events (legacy addSseClient transport; events/sse.js SSEManager is dormant — zero importers). Envelope {event, payload}, ping heartbeat 25s. Bus EventTypes: file:created/modified/deleted, ingest:queued/progress/complete/error, chat:delta/toolStart/toolEnd/done, graph:updated, settings:changed; plus agent-event frames, file-sync:// topics, claude-cli/codex-cli stream topics.'
+        technology 'events/bus.js · events.js · api/events.js'
+      }
+
+      invokeBridge = component 'Invoke bridge (legacy) [LIVE — primary client path]' {
+        description 'POST /api/invoke/:command dispatching the ~72-command registry: fs, project, search (search_project, embedding_fetch), websearch, fileSync, vectorstore, maintenance, agent (agent_start_turn[_stream], cancel, sessions, skills), CLI transports, extractImages, opener, misc. Emits Deprecation/Warning headers under v2; primary command surface of the web client today.'
+        technology 'invoke.js + commands/*'
+        metadata {
+          evidence 'invoke.js:18-31 · index-v2.js:119 · runtime /api/v2/health reports commands:72 (host) / 75 (container)'
+        }
+      }
+
+      proxyApi = component 'LLM/embed/search proxy' {
+        description 'POST /api/proxy: cross-origin streaming proxy ({url, method, headers, body}; http/https only; hop-by-hop headers stripped; upstream streamed back) so the browser client can call LLM/embedding/search endpoints CORS-free — replaces the Tauri HTTP plugin. Inline token auth before body parsing.'
+        technology 'proxy.js'
+      }
+
+      openapiDoc = component 'OpenAPI 3.1 document' {
+        description 'GET /api/v2/openapi.json generated from @llm-wiki/api-types Zod schemas via zod-to-openapi (subset of areas registered: projects, chat sessions, chunked upload, error envelope).'
+        technology 'openapi.js'
+      }
+
+      agentRuntime = component 'Chat agent runtime' {
+        description 'agent.js runLoop: fire-and-forget agentStartTurnStream; MAX_ITER 8; history loaded server-side from SQLite (historyLimit default 20); user message persisted at turn start, assistant message + deduped refs on completion; cancellation registry. Streams agent-event envelopes {sessionId, runId, event}: messageDelta, toolStart/toolEnd, referenceAdded, fileChanged, done, error. Dual emission maps to chat:* SSE types.'
+        technology 'agent.js · llm-call.js (OpenAI/Anthropic wires) · llm-resolve.js'
+      }
+
+      agentTools = component 'Agent tools' {
+        description 'Registry: wiki.search (honours wikiSearchMode), wiki.read_page, source.search (raw/sources keyword scan), graph.search (neighbor expansion), web.search, anytxt.search, wiki.write_page, workspace.write_file/append_file, shell.exec (approval-gated), skills.load, skill.read_file, llm.generate; deep_research.run registered but loop-rejected (client orchestrates it).'
+        technology 'agent-tools.js'
+      }
+
+      ingestOrchestrator = component 'Ingest orchestrator' {
+        description 'Claim loop with concurrency slots (DEFAULT_CONCURRENCY 2, env LLM_WIKI_INGEST_CONCURRENCY 1..16); FIFO claim with per-project serialization; MAX_ATTEMPTS 3; usage-limit errors defer with 15-min backoff without consuming attempts; 60s sweep for deferred rows; boot recovery resetInterruptedTasks (processing rows reset to pending or failed). Fresh per-attempt config from app-state.json; rejects claude-code/codex-cli providers.'
+        technology 'ingest/orchestrator.js · store/ingest-queue.js'
+      }
+
+      ingestPipeline = component 'Ingest pipeline (14 stages)' {
+        description 'Stages with reported percents: preprocess 5, mineru 15, context 20, cache-check 25, images 30, caption 40, analysis 55, generation 75, review-stage 80, write 85, index-log 90, reviews 92, cache-save 95, embed 98, then a 100 completion frame. Progress persists only at stage boundaries (touchIngestTask + ingest:progress SSE). FILE blocks may only target wiki/ (path safety gate); writes merge pages, back up to .llm-wiki/page-history/, append log.md, rebuild index.md deterministically. Four caches: ingest-cache.json, <sourceDir>/.cache text cache, image-caption-cache.json, long-source checkpoints.'
+        technology 'ingest/pipeline.js + progress.js + 20 stage modules'
+      }
+
+      searchEngine = component 'Search engine' {
+        description 'Keyword leg scans <=5000 wiki pages (title-substring +100, token +20, capped body hits); vector leg queries sqlite-vec vec_chunks (cosine, score 1/(1+distance)); merged via RRF (k=60) when both legs hit; graph layer blends wikilink neighbors (quota 15-30%). Degrade is by design and never fails the request: sqlite-vec missing / embedding disabled or failing / empty index / dim mismatch each return a vectorUnavailableReason while keyword results still ship.'
+        technology 'commands/search.js · commands/vectorstore.js · graph.js'
+      }
+
+      graphEngine = component 'Graph engine' {
+        description 'Builds the wikilink adjacency snapshot on the fly from wiki/*.md ([[wikilinks]], frontmatter type/tags, backlinks); searchGraph neighbor expansion; blendGraphResults layer; countWikilinks drives graph:updated SSE. Note: graph_nodes/graph_edges tables exist (migration 008) but have no writer or reader in code — runtime rows: 0.'
+        technology 'graph.js'
+      }
+
+      storeLayer = component 'Store layer' {
+        description 'better-sqlite3 at DATA_DIR/server.db with sqlite-vec loaded eagerly (graceful keyword-only degrade), WAL + foreign_keys, migrations 001-013. JSON plugin-store backend for app-state.json: discovers the desktop Tauri store file across per-OS candidate dirs, else DATA_DIR/stores; overrides LLM_WIKI_STORE_FILE / LLM_WIKI_NO_SHARE. 21-key STORE_KEYS whitelist.'
+        technology 'store/db.js · store.js · store/projects.js · chat-sessions.js · ingest-queue.js · project-paths.js'
+      }
+
+      workerPool = component 'Worker pool' {
+        description 'Fixed worker_threads pool (cpus-1 slots, crash respawn). Registered tasks: preprocess (pdfjs-dist PDF, OOXML XML-parse, epub/mobi text) and extractImages; preprocess is used by the ingest context stage, image extraction in the pipeline is currently called directly on the main thread.'
+        technology 'workers/pool.js · worker.js · tasks.js'
+      }
+
+      cliTransports = component 'CLI chat transports' {
+        description 'cli.js spawns locally installed claude / codex binaries as LLM engines; registry: claude_cli_detect/spawn/kill, codex_cli_detect/spawn/kill; output streamed over SSE topics claude-cli:{streamId}[:done] and codex-cli:{streamId}[:done].'
+        technology 'cli.js'
+      }
+    }
+
+    legacyServer = service 'Legacy Node Server (v1 surface)' {
+      description 'Raw node:http server (npm run server), hand-rolled routing and JSON envelopes, 64MB body cap. The only Node entry mounting /api/v1/* (desktop-parity: health, projects, files, reviews, search, chat, chat cancel, graph, sources/rescan) plus /api/commands, /api/invoke/:command, /api/store, /api/proxy, /api/raw, legacy SSE at /api/events. Does not boot the v2 SQLite/auth/openapi stack; same SPA static serving.'
+      technology 'node:http · index.js + api-v1.js'
+      metadata {
+        evidence 'packages/server/src/index.js (route table :124-201) · api-v1.js:229-308'
+      }
+    }
+  }
+
+  // Server-internal relationships (component level)
+  llmWiki.nodeServer.httpSurface -> llmWiki.nodeServer.apiProjects
+  llmWiki.nodeServer.httpSurface -> llmWiki.nodeServer.apiChat
+  llmWiki.nodeServer.httpSurface -> llmWiki.nodeServer.apiSearch
+  llmWiki.nodeServer.httpSurface -> llmWiki.nodeServer.apiIngest
+  llmWiki.nodeServer.httpSurface -> llmWiki.nodeServer.apiOps
+  llmWiki.nodeServer.apiChat -> llmWiki.nodeServer.agentRuntime 'starts turn'
+  llmWiki.nodeServer.agentRuntime -> llmWiki.nodeServer.agentTools 'tool loop (max 8 iterations)'
+  llmWiki.nodeServer.agentTools -> llmWiki.nodeServer.searchEngine 'wiki.search'
+  llmWiki.nodeServer.agentTools -> projectDirs 'read_page / source.search / write_page'
+  llmWiki.nodeServer.agentRuntime -> serverDb 'sessions + messages'
+  llmWiki.nodeServer.agentRuntime -> llmProvider 'streamCall'
+  llmWiki.nodeServer.agentRuntime .async llmWiki.nodeServer.eventsSse 'agent-event frames'
+  llmWiki.nodeServer.apiIngest -> serverDb 'ingest_queue rows'
+  llmWiki.nodeServer.apiIngest -> projectDirs 'raw/sources upload'
+  llmWiki.nodeServer.ingestOrchestrator -> serverDb 'claim / complete / fail'
+  llmWiki.nodeServer.ingestOrchestrator -> llmWiki.nodeServer.ingestPipeline 'runs task'
+  llmWiki.nodeServer.ingestPipeline -> llmWiki.nodeServer.workerPool 'preprocess extraction'
+  llmWiki.nodeServer.ingestPipeline -> llmProvider 'analysis / generation / review / caption / merge' 'streamChat, 30-min backstop'
+  llmWiki.nodeServer.ingestPipeline -> mineru 'PDF parse (optional)'
+  llmWiki.nodeServer.ingestPipeline -> projectDirs 'wiki/ FILE blocks + state'
+  llmWiki.nodeServer.ingestPipeline -> embeddingProvider 'embed chunks'
+  llmWiki.nodeServer.ingestPipeline -> serverDb 'vec_chunks upsert'
+  llmWiki.nodeServer.ingestPipeline .async llmWiki.nodeServer.eventsSse 'ingest:progress / complete / error'
+  llmWiki.nodeServer.apiSearch -> llmWiki.nodeServer.searchEngine
+  llmWiki.nodeServer.searchEngine -> serverDb 'vec_chunks MATCH + keyword scan of wiki/'
+  llmWiki.nodeServer.searchEngine -> llmWiki.nodeServer.graphEngine 'blend neighbors'
+  llmWiki.nodeServer.searchEngine -> embeddingProvider 'query embedding'
+  llmWiki.nodeServer.apiOps -> sharedStore 'settings read/write'
+  llmWiki.nodeServer.storeLayer -> serverDb
+  llmWiki.nodeServer.storeLayer -> sharedStore
+  llmWiki.nodeServer.invokeBridge -> llmWiki.nodeServer.agentRuntime 'agent_* commands'
+  llmWiki.nodeServer.invokeBridge -> llmWiki.nodeServer.searchEngine 'search_project / vector_*'
+  llmWiki.nodeServer.invokeBridge -> llmWiki.nodeServer.cliTransports 'claude_cli_* / codex_cli_*'
+  llmWiki.nodeServer.cliTransports -> cliEngines 'spawns binaries'
+}

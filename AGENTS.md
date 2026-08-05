@@ -34,4 +34,8 @@ index and report files are the durable, traceable record.
   typecheck + server tests.
 - Docs live in `docs/` (see `docs/PUSH1_ACTUAL_ARCHITECTURE.md` for the actual
   architecture and accepted deviations, `docs/API_REFERENCE.md`,
-  `docs/DEPLOYMENT.md`); design plans in `plans/`.
+  `docs/DEPLOYMENT.md`); the LikeC4 as-built architecture model lives in
+  `docs/architecture/likec4/` (guide + evidence record:
+  `docs/architecture/README.md`); the promise-vs-actual architecture review is
+  `docs/architecture/PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md`; design plans in
+  `plans/`.

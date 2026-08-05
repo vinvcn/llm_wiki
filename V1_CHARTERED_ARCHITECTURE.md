@@ -8,6 +8,14 @@
 > the implementation are tracked in issue #14.
 >
 > **Cross-references**: [PLAN.md](PLAN.md) (implementation plan) · [GOAL.md](GOAL.md) (goal definition) · [RUNBOOK.md](RUNBOOK.md) (current operational runbook)
+>
+> **Promise-vs-actual review (2026-08-05)**: an independent audit of this
+> charter against the as-built system lives at
+> [docs/architecture/PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md](docs/architecture/PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md).
+> Headline: the promise was kept within its v1 scope, but the charter's
+> desktop-deferred premise was inverted by reality (the desktop app is the
+> original, parallel-backend product) — read the review before reading this
+> document as current truth.
 
 ---
 

@@ -15,6 +15,11 @@ answer).
 > SPA in `src/`, built to `dist-web/`). The desktop (Tauri) app shares the same
 > on-disk project format and plugin store; differences are noted where relevant.
 
+> Machine-readable counterpart: a LikeC4 model covering **both** the web and
+> desktop stacks, with per-element evidence and rendered views, lives in
+> [`docs/architecture/likec4/`](architecture/likec4/) — guide and evidence
+> record in [`architecture/README.md`](architecture/README.md).
+
 ---
 
 ## 1. High-level architecture

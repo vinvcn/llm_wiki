@@ -1,0 +1,234 @@
+// Views over the LLM Wiki model. Scoped views (view of X) double as
+// drill-down targets: clicking an element navigates to its view.
+
+views {
+
+  // ----------------------------------------------------------------
+  view index {
+    title 'LLM Wiki — system context'
+    include *
+    // flags have their own view; keep the context map clean
+    exclude
+      obsInvokeBridge,
+      obsSseDormant,
+      obsGraphTables,
+      obsSharedPort,
+      obsV1Legacy,
+      obsOrphans,
+      obsSearchSchema,
+      obsIngestProgress
+  }
+
+  // ----------------------------------------------------------------
+  view containers {
+    title 'Containers — web stack, desktop stack, shared data'
+    include
+      llmWiki.*,
+      llmProvider,
+      embeddingProvider,
+      mineru,
+      searchProviders,
+      anytxt,
+      mcpHost,
+      cliEngines,
+      serverDb,
+      sharedStore,
+      projectDirs
+  }
+
+  // ----------------------------------------------------------------
+  view serverComponents of llmWiki.nodeServer {
+    title 'Node server — components (web mode backend)'
+    include *
+    include
+      llmProvider,
+      embeddingProvider,
+      mineru,
+      searchProviders,
+      anytxt,
+      cliEngines,
+      serverDb,
+      sharedStore,
+      projectDirs
+  }
+
+  // ----------------------------------------------------------------
+  view clientComponents of llmWiki.webClient {
+    title 'Web client — components (shared by web and desktop builds)'
+    include *
+    include
+      llmWiki.nodeServer.httpSurface,
+      llmWiki.nodeServer.invokeBridge,
+      llmWiki.nodeServer.eventsSse,
+      llmWiki.desktop.ipcCommands,
+      sharedStore,
+      llmProvider,
+      searchProviders
+  }
+
+  // ----------------------------------------------------------------
+  view desktopSurface of llmWiki.desktop {
+    title 'Desktop surface — Tauri shell, MCP server, browser clipper'
+    include *
+    include
+      llmWiki.mcpServer,
+      llmWiki.browserExtension,
+      mcpHost,
+      cliEngines,
+      llmProvider,
+      projectDirs
+  }
+
+  // ----------------------------------------------------------------
+  view dataLayer {
+    title 'Data layer — who writes and reads what'
+    include
+      serverDb,
+      sharedStore,
+      projectDirs,
+      llmWiki.nodeServer.storeLayer,
+      llmWiki.nodeServer.agentRuntime,
+      llmWiki.nodeServer.ingestPipeline,
+      llmWiki.nodeServer.searchEngine,
+      llmWiki.nodeServer.apiOps,
+      llmWiki.webClient.storesState,
+      llmWiki.desktop.ipcCommands,
+      llmWiki.desktop.lanceDb,
+      llmWiki.desktop.clipServer
+  }
+
+  // ----------------------------------------------------------------
+  // Dynamic views. Steps mirror the live trace of the 2026-08-05
+  // acceptance session (chat: "hi, what is 声音选择"; ingest: the PDF
+  // run, task id 3, 4m56s) cross-checked against the code paths.
+  // ----------------------------------------------------------------
+
+  dynamic view chatFlow {
+    title 'Chat Q&A — one agent turn (web mode)'
+    description 'POST returns {runId, sessionId} immediately; tokens stream over SSE while the loop runs; messages persist at turn boundaries, not per delta.'
+
+    llmWiki.webClient.chatPanel -> llmWiki.webClient.invokeTransport 'agent_start_turn_stream'
+    llmWiki.webClient.invokeTransport -> llmWiki.nodeServer.invokeBridge 'POST /api/invoke/agent_start_turn_stream'
+    llmWiki.nodeServer.invokeBridge -> llmWiki.nodeServer.agentRuntime 'agentStartTurnStream -> runLoop'
+    llmWiki.nodeServer.agentRuntime -> serverDb 'persist user message (chat_messages)'
+    llmWiki.nodeServer.agentRuntime -> sharedStore 'resolveChatConfig (llmConfig + presets)'
+
+    loop 'until a turn without tool calls (MAX_ITER 8)' {
+      llmWiki.nodeServer.agentRuntime -> llmProvider 'streamCall (OpenAI/Anthropic wire)'
+      opt 'assistant requests a tool' {
+        llmWiki.nodeServer.agentRuntime -> llmWiki.nodeServer.searchEngine 'wiki.search (honours wikiSearchMode)'
+        llmWiki.nodeServer.searchEngine -> serverDb 'vec_chunks MATCH + keyword scan'
+        llmWiki.nodeServer.agentRuntime -> projectDirs 'wiki.read_page / source.search'
+      }
+    }
+
+    llmWiki.nodeServer.agentRuntime -> llmWiki.nodeServer.eventsSse 'agent-event frames (chat:delta / toolStart / toolEnd / done)'
+    llmWiki.nodeServer.eventsSse -> llmWiki.webClient.v2Client 'SSE GET /api/v2/events (25s ping)'
+    llmWiki.webClient.v2Client -> llmWiki.webClient.chatPanel 'render stream + references'
+    llmWiki.nodeServer.agentRuntime -> serverDb 'persist assistant message + refs'
+  }
+
+  dynamic view ingestFlow {
+    title 'Ingest — source to wiki pages + embeddings'
+    description 'Stages with reported percents: preprocess 5, mineru 15, context 20, cache-check 25, images 30, caption 40, analysis 55, generation 75, review-stage 80, write 85, index-log 90, reviews 92, cache-save 95, embed 98, completion frame 100. Progress persists only at stage boundaries — a healthy long LLM call looks like a stuck row (issue #32).'
+
+    llmWiki.webClient.uiShell -> llmWiki.webClient.v2Client 'drop or select a file'
+    llmWiki.webClient.v2Client -> llmWiki.nodeServer.apiIngest 'POST ingest/upload (multipart, server cap 50MB)'
+    llmWiki.nodeServer.apiIngest -> projectDirs 'write raw/sources/<ts>_<rand>_<name>'
+    llmWiki.nodeServer.apiIngest -> serverDb 'ingest_queue insert (pending) + SSE ingest:queued'
+    llmWiki.nodeServer.ingestOrchestrator -> serverDb 'claimNextIngestTask (FIFO, per-project serialization)'
+    llmWiki.nodeServer.ingestOrchestrator -> llmWiki.nodeServer.ingestPipeline 'runIngestPipeline (concurrency 2)'
+    llmWiki.nodeServer.ingestPipeline -> llmWiki.nodeServer.workerPool 'preprocess: pdfjs / OOXML / epub text extraction'
+
+    opt 'PDF and mineruConfig.enabled (disabled in live deployment)' {
+      llmWiki.nodeServer.ingestPipeline -> mineru 'cloud /api/v4 or local :8000; fallback built-in extraction'
+    }
+    opt 'cache hit: sha256 match and prior outputs still on disk' {
+      llmWiki.nodeServer.ingestPipeline -> projectDirs 'short-circuit via .llm-wiki/ingest-cache.json'
+    }
+
+    llmWiki.nodeServer.ingestPipeline -> llmProvider 'analysis -> generation -> review (streamChat, 30-min backstop)'
+    llmWiki.nodeServer.ingestPipeline -> projectDirs 'write: FILE blocks under wiki/, page merge, page-history backups, index/log upkeep'
+    llmWiki.nodeServer.ingestPipeline -> projectDirs 'reviews -> .llm-wiki/review.json · cache-save ingest-cache.json'
+    llmWiki.nodeServer.ingestPipeline -> embeddingProvider 'embed chunks (index/log/overview skipped)'
+    llmWiki.nodeServer.ingestPipeline -> serverDb 'vec_chunks upsert (sqlite-vec vec0, cosine)'
+    llmWiki.nodeServer.ingestPipeline -> llmWiki.nodeServer.eventsSse 'ingest:progress at stage boundaries · ingest:complete / error'
+    llmWiki.nodeServer.eventsSse -> llmWiki.webClient.v2Client 'SSE'
+  }
+
+  // ----------------------------------------------------------------
+  // Dual-backend mirror: the same product jobs implemented twice
+  // (JS web stack vs Rust desktop stack), joined by `parallel` edges.
+  // ----------------------------------------------------------------
+  view dualBackends {
+    title 'Dual backends — functional mirrors (JS web stack vs Rust desktop stack)'
+    description 'Dashed edges join functionally equivalent implementations. The stacks share only what is on disk: project directories and app-state.json. MCP and the clipper attach to the desktop side; the browser SPA to the Node side.'
+
+    include
+      llmWiki.nodeServer.httpSurface,
+      llmWiki.nodeServer.invokeBridge,
+      llmWiki.nodeServer.agentRuntime,
+      llmWiki.nodeServer.searchEngine,
+      llmWiki.nodeServer.storeLayer,
+      llmWiki.nodeServer.cliTransports,
+      llmWiki.desktop.apiServer,
+      llmWiki.desktop.clipServer,
+      llmWiki.desktop.ipcCommands,
+      llmWiki.desktop.rustAgent,
+      llmWiki.desktop.lanceDb,
+      serverDb,
+      sharedStore,
+      projectDirs
+  }
+
+  // ----------------------------------------------------------------
+  // Audit map: every observation as an amber flag node wired to the
+  // element(s) it concerns. Write-ups: ../README.md §Observations.
+  // ----------------------------------------------------------------
+  view flags {
+    title 'Observations & flags — audit findings anchored to their elements'
+    description 'Amber document nodes are findings from the 2026-08-05 audit (model-flags.c4); arrows point at where each one lives. Categories: structural (designed), vestige (superseded), contract (SSOT drift), operational (runtime UX).'
+
+    include
+      obsInvokeBridge,
+      obsSseDormant,
+      obsGraphTables,
+      obsSharedPort,
+      obsV1Legacy,
+      obsOrphans,
+      obsSearchSchema,
+      obsIngestProgress,
+      llmWiki.nodeServer,
+      llmWiki.legacyServer,
+      llmWiki.nodeServer.invokeBridge,
+      llmWiki.nodeServer.eventsSse,
+      llmWiki.nodeServer.graphEngine,
+      llmWiki.nodeServer.apiSearch,
+      llmWiki.nodeServer.agentTools,
+      llmWiki.nodeServer.workerPool,
+      llmWiki.nodeServer.openapiDoc,
+      llmWiki.nodeServer.ingestPipeline,
+      llmWiki.nodeServer.ingestOrchestrator,
+      llmWiki.desktop.apiServer,
+      llmWiki.mcpServer,
+      llmWiki.browserExtension,
+      llmWiki.webClient.invokeTransport,
+      llmWiki.webClient.v2Client,
+      llmWiki.webClient.uiShell,
+      llmWiki.webClient.clientPipelines,
+      llmWiki.webClient.storesState,
+      serverDb
+  }
+
+  // ----------------------------------------------------------------
+  view deployment {
+    title 'Deployment — Docker container, desktop host, dev run'
+    include
+      deployment.**,
+      llmWiki.nodeServer,
+      llmWiki.webClient,
+      llmWiki.desktop,
+      serverDb,
+      sharedStore
+  }
+}

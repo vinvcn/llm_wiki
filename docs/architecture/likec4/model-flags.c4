@@ -1,0 +1,63 @@
+// Observations / flags as first-class elements.
+//
+// Each flag is an audit finding anchored to the element(s) it concerns, so
+// the diagrams show WHERE each observation lives instead of burying it in
+// prose. Full write-ups: ../README.md §Observations and flags. Categories:
+// structural (designed), vestige (superseded code), contract (SSOT drift),
+// operational (runtime UX gap).
+
+model {
+
+  obsInvokeBridge = flag 'OBS · invoke bridge is the live client path' {
+    description 'Structural: the web UI sends most commands through the legacy invoke() shim -> POST /api/invoke/:command (invoke.js, 72-command registry), not the typed /api/v2 REST surface. The typed startChat (src/api/chat.ts:74) and search (src/api/search.ts:52) have zero production callers; session CRUD and ingest REST are live. Evidence: grep for callers (none outside src/api), runtime health commands:72/75.'
+  }
+  obsInvokeBridge -> llmWiki.webClient.invokeTransport 'web shim resolves here'
+  obsInvokeBridge -> llmWiki.nodeServer.invokeBridge 'carries most traffic'
+  obsInvokeBridge -> llmWiki.webClient.v2Client 'typed chat/search unused'
+
+  obsSseDormant = flag 'OBS · events/sse.js dormant, stale comments claim otherwise' {
+    description 'Vestige: SSEManager in packages/server/src/events/sse.js has zero importers; GET /api/v2/events registers clients via addSseClient in events.js (api/events.js:12,30). Trap: comments in events.js:11,44 still claim v2 uses events/sse.js — the opposite of the import graph. An editor touching the "new" manager changes nothing.'
+  }
+  obsSseDormant -> llmWiki.nodeServer.eventsSse 'live transport is addSseClient'
+
+  obsGraphTables = flag 'OBS · vestigial SQLite tables (graph_nodes/graph_edges + reviews)' {
+    description 'Vestige: migration 008_graph_nodes_edges (packages/server/src/store/db.js:171) created the graph tables and the reviews table was created at store/db.js:142, but no code writes or reads either; runtime rows: 0 in both observed databases. The served graph is built on the fly from [[wikilinks]] in wiki/*.md (graph.js); reviews live in .llm-wiki/review.json (api/reviews.js, api-v1.js:170). Markdown/file-as-truth keeps the vault Obsidian-compatible; the tables are dead schema.'
+  }
+  obsGraphTables -> llmWiki.nodeServer.graphEngine 'on-the-fly wikilink graph'
+  obsGraphTables -> serverDb 'migration 008 tables, never populated'
+
+  obsSharedPort = flag 'OBS · port 19828 shared by design (Node dev = desktop API)' {
+    description 'Structural/intentional: desktop api_server binds 19828 and the Node dev default PORT is also 19828 (config.js), so the web client hardcoded default BACKEND http://127.0.0.1:19828 works against either backend. Consequence: running both on one host fails with EADDRINUSE unless PORT is overridden. Docker uses 3000 (compose 0.0.0.0:3000->3000).'
+  }
+  obsSharedPort -> llmWiki.nodeServer 'dev default PORT 19828'
+  obsSharedPort -> llmWiki.desktop.apiServer 'PORT 19828'
+
+  obsV1Legacy = flag 'OBS · /api/v1 only on legacy entry; v1 consumers cannot reach Docker' {
+    description 'Structural: index-v2.js (Docker CMD) never mounts /api/v1; only index.js (npm run server, raw node:http) does. The /api/v1 consumers — MCP server and browser clipper — therefore only work against the desktop servers, never the deployed web server. If MCP-against-Docker is ever wanted, this is the gap.'
+  }
+  obsV1Legacy -> llmWiki.legacyServer 'sole v1 mount (index.js route table)'
+  obsV1Legacy -> llmWiki.mcpServer 'speaks /api/v1 -> desktop only'
+  obsV1Legacy -> llmWiki.browserExtension 'speaks :19827 -> desktop only'
+
+  obsOrphans = flag 'OBS · orphaned code sweep (6 items, looks alive but is not)' {
+    description 'Vestige sweep: (1) @milkdown/* deps (package.json:33-35) never imported — editor is a textarea; (2) sweepResolvedReviews (src/lib/sweep-reviews.ts) imported only by tests; (3) client mineru.ts used solely by the Settings connection test (mineru-section.tsx); (4) retrievalMode persisted in chat store (src/stores/chat-store.ts:63) but never sent to any backend — server search mode comes from app-state wikiSearchMode; (5) deep_research.run registered in agent-tools.js:51 with an executor (:212-222) but loop-rejected via LOOP_TOOL_REJECTIONS (agent.js:108) — client orchestrates deep research; (6) worker pool image extraction runs on the main thread instead of the pool (ingest/pipeline.js).'
+  }
+  obsOrphans -> llmWiki.webClient.uiShell '1: milkdown deps, textarea editor'
+  obsOrphans -> llmWiki.webClient.clientPipelines '2+3: sweepResolvedReviews, mineru.ts'
+  obsOrphans -> llmWiki.webClient.storesState '4: retrievalMode never sent'
+  obsOrphans -> llmWiki.nodeServer.apiSearch '4: mode = wikiSearchMode, not request'
+  obsOrphans -> llmWiki.nodeServer.agentTools '5: deep_research.run loop-rejected'
+  obsOrphans -> llmWiki.nodeServer.workerPool '6: extractImages bypasses pool'
+
+  obsSearchSchema = flag 'OBS · SearchResultSchema under-describes live payload → issue #38' {
+    description 'Contract: packages/api-types SearchResultSchema declares {path, score, snippet?, content?} but commands/search.js:338-342 (keyword) and :213-221 (vector) emit {path, title, snippet, titleMatch, score, images, [vectorScore], [content]}. Zod parse strips unknown keys, so validating a real response silently drops title/images/titleMatch/vectorScore. Harmless today (type-only imports; search not in the OpenAPI subset); filed as issue #38.'
+  }
+  obsSearchSchema -> llmWiki.nodeServer.apiSearch 'payload built in commands/search.js'
+  obsSearchSchema -> llmWiki.nodeServer.openapiDoc 'would mis-document if search registered'
+
+  obsIngestProgress = flag 'OBS · ingest progress frozen mid-stage → issue #32' {
+    description 'Operational: ingest percent persists only at stage boundaries (touchIngestTask + ingest:progress SSE); a healthy multi-minute analysis/generation LLM call leaves the queue row unchanged, indistinguishable from a stuck run. Tracked in issue #32 (heartbeat). Operational takeaway: do not kill/retry "stuck" tasks prematurely.'
+  }
+  obsIngestProgress -> llmWiki.nodeServer.ingestPipeline 'progress persists at boundaries'
+  obsIngestProgress -> llmWiki.nodeServer.ingestOrchestrator 'queue row looks stuck'
+}

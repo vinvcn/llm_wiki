@@ -1,0 +1,119 @@
+// Desktop surface: Tauri shell (Rust), bundled MCP server, browser clipper,
+// and deployment nodes. Evidence: src-tauri/, mcp-server/, extension/,
+// Dockerfile, docker-compose.yml, plus live docker inspect (2026-08-05).
+
+model {
+
+  extend llmWiki {
+
+    desktop = desktop 'Desktop shell (Tauri + Rust)' {
+      description 'Rust shell hosting the same React frontend in a webview (frontendDist ../dist, devUrl localhost:1420). Boots plugins, applies proxy env from app-state, then clip server, then API server, then tray; ~80 IPC commands; close-to-tray behavior configurable. Embeds its OWN backend implementations — a parallel stack to the Node server: Rust agent runtime, LanceDB vector store, RRF search in Rust.'
+      technology 'Tauri 2 · Rust · tiny_http · LanceDB · pdfium-render'
+      metadata {
+        evidence 'src-tauri/Cargo.toml · src-tauri/src/lib.rs run() :548-619 · tauri.conf.json'
+      }
+
+      webview = component 'Webview frontend' {
+        description 'The shared React app (same src/ as the web build, desktop vite config) running inside the Tauri webview; talks to Rust over IPC, never over /api/v2.'
+      }
+
+      ipcCommands = component 'IPC command surface (~80)' {
+        description 'Registered in lib.rs: fs (file ops + preprocess), project (create/open), project_maintenance (export/import, rebuild index), search (keyword + embeddings), vectorstore (LanceDB upsert/search/chunks), file_history, file_sync (notify watcher, rescan, change queue), external_search (web/AnyTXT), extract_images (PDF/Office), ebook, claude_cli/codex_cli (+cli_resolver), and more.'
+        technology 'src-tauri/src/commands/*'
+      }
+
+      rustAgent = component 'Agent runtime (Rust)' {
+        description 'AgentRuntime orchestrating a chat turn; intent router (route_query), LlmClient/LlmConfig provider layer, tools incl. web/anytxt search, project context assembly, on-disk session store, cancellation registry, AgentEvent streams, capability/permission policy, project skills (.llm-wiki/skills), public agent workspace dir. Shared by the desktop UI, the local HTTP API, and MCP.'
+        technology 'src-tauri/src/agent/*'
+      }
+
+      lanceDb = database 'LanceDB vector store' {
+        description 'Desktop-side embeddings + chunk search (commands/vectorstore.rs, lancedb 0.27 crate) — the desktop counterpart of the Node server sqlite-vec index.'
+        metadata {
+          evidence 'src-tauri/Cargo.toml (lancedb) · src-tauri/src/commands/vectorstore.rs'
+        }
+      }
+
+      apiServer = service 'Local API server :19828' {
+        description 'tiny_http server, PORT 19828, prefix /api/v1, rate limit 120 req/s, 64 max in-flight, 1MB body (40MB chat). Routes: health (also at /health), projects, files, files/content, reviews (+resolve, patch), search (POST), graph, sources/rescan (POST), chat (POST), chat cancel. Kill-switch 503 when apiConfig.enabled=false; bearer token auth (LLM_WIKI_API_TOKEN); bind host loopback by default, LAN opt-in.'
+        technology 'src-tauri/src/api_server.rs · server_bind.rs · cors.rs'
+      }
+
+      clipServer = service 'Clip server :19827' {
+        description 'tiny_http server, PORT 19827, for the browser extension: GET /status, /project, /projects; POST /project, /projects, /clip; GET /clips/pending. handle_clip writes a Markdown file with web-clip frontmatter to <project>/raw/sources/<slug>-<date>.md and queues it for frontend auto-ingest. Loopback callers bypass auth; LAN callers need the API token.'
+        technology 'src-tauri/src/clip_server.rs'
+      }
+
+      trayShell = component 'Tray & window lifecycle' {
+        description 'System tray (Show / Quit), left-click shows window; close behavior ask/minimize/exit with tray-hide; autostart plugin.'
+        technology 'src-tauri/src/tray.rs · generalConfig'
+      }
+    }
+
+    mcpServer = service 'MCP server (llm-wiki-mcp)' {
+      description 'Node stdio MCP server (bin llm-wiki-mcp, engines node>=20, sole dep @modelcontextprotocol/sdk). Tools: llm_wiki_status, llm_wiki_projects, llm_wiki_set_project, llm_wiki_files, llm_wiki_read_file, llm_wiki_reviews, llm_wiki_search, llm_wiki_chat, llm_wiki_graph, llm_wiki_rescan_sources. Project pinning: session pinned to one project (uuid | path | current) until re-set. Talks HTTP to the DESKTOP local API server (DEFAULT_API_BASE_URL http://127.0.0.1:19828, paths /api/v1/*, Bearer LLM_WIKI_API_TOKEN) — not to the Node /api/v2 server; hand-rolled interfaces, no api-types dependency.'
+      technology 'mcp-server/src/index.ts · api-client.ts · project-binding.ts'
+    }
+
+    browserExtension = service 'Browser clipper (MV3)' {
+      description 'Extension "LLM Wiki Clipper" v0.1.0: command clip-current-page (Alt+Shift+L / Cmd+Shift+L) or popup; injects Readability + Turndown into the active tab, converts article HTML to Markdown (1,000,000-char cap, innerText fallback), then POST /clip {title, url, content, projectPath} to the desktop clip server. Host permissions fixed to http://127.0.0.1:19827 and http://localhost:19827; GETs retry across both loopback URLs, POSTs never retry; normalizeServerUrl forces port 19827.'
+      technology 'extension/manifest.json · background.js · clipper-core.js · popup.js'
+    }
+  }
+
+  // Desktop-internal relationships
+  llmWiki.desktop.webview -> llmWiki.desktop.ipcCommands 'Tauri invoke'
+  llmWiki.desktop.ipcCommands -> llmWiki.desktop.rustAgent 'agent turns'
+  llmWiki.desktop.ipcCommands -> llmWiki.desktop.lanceDb 'vector ops'
+  llmWiki.desktop.ipcCommands -> projectDirs 'fs / file_sync / clips'
+  llmWiki.desktop.apiServer -> llmWiki.desktop.rustAgent 'chat + search'
+  llmWiki.desktop.apiServer -> llmWiki.desktop.lanceDb
+  llmWiki.desktop.clipServer -> projectDirs 'writes raw/sources clips'
+  llmWiki.desktop.clipServer .async llmWiki.desktop.webview 'pending clips polled by clip-watcher (3s)'
+  llmWiki.desktop.rustAgent -> llmProvider 'LlmClient HTTP'
+  llmWiki.desktop.rustAgent -> cliEngines 'claude_cli / codex_cli subprocess'
+  llmWiki.mcpServer -> llmWiki.desktop.apiServer 'HTTP /api/v1 · Bearer token'
+  llmWiki.browserExtension -> llmWiki.desktop.clipServer 'POST /clip (127.0.0.1:19827)'
+
+  // Functional mirrors across the two backend stacks (see dualBackends view).
+  llmWiki.nodeServer.httpSurface .parallel llmWiki.desktop.apiServer 'HTTP API: /api/v2 vs /api/v1'
+  llmWiki.nodeServer.invokeBridge .parallel llmWiki.desktop.ipcCommands 'command registry: ~72 vs ~80'
+  llmWiki.nodeServer.agentRuntime .parallel llmWiki.desktop.rustAgent 'chat agent loop'
+  llmWiki.nodeServer.searchEngine .parallel llmWiki.desktop.ipcCommands 'keyword + vector search'
+  llmWiki.nodeServer.storeLayer .parallel llmWiki.desktop.lanceDb 'vector index: sqlite-vec vs LanceDB'
+  llmWiki.nodeServer.cliTransports .parallel llmWiki.desktop.ipcCommands 'claude_cli / codex_cli transports'
+
+  // ------------------------------------------------------------------
+  // Deployment nodes (as observed 2026-08-05; ports/volumes from compose
+  // file + docker inspect)
+  // ------------------------------------------------------------------
+
+  deployment = node 'Deployment (observed 2026-08-05)' {
+    description 'Two runtime shapes evidenced on the acceptance host: a Docker container running the Node web server, and the desktop app with its embedded localhost servers. Dev runs use the same Node entry from a git worktree on the default port.'
+    metadata {
+      evidence 'docker-compose.yml · Dockerfile · docker ps / docker inspect 2026-08-05'
+    }
+
+    dockerHost = node 'Docker host' {
+
+      wikiContainer = node 'container: phase3-integration-llm-wiki-1' {
+        description 'Image llm-wiki (3-stage node:22-slim: builder runs build:api-types + build:web -> dist-web; deps npm ci --omit=dev; runtime copies packages/server + api-types dist + prod node_modules + dist-web). ENV NODE_ENV=production, LLM_WIKI_HOST=0.0.0.0, LLM_WIKI_PORT=3000, LLM_WIKI_DATA_DIR=/data. EXPOSE 3000, VOLUME /data (server.db + stores/app-state.json observed inside). Healthcheck curl /api/v2/health every 30s; restart unless-stopped; observed Up+healthy v0.6.6, banner reports 75 registered commands. Compose env: LLM_WIKI_AUTH_MODE (default open), LLM_WIKI_API_TOKEN.'
+        technology 'compose service llm-wiki · 0.0.0.0:3000->3000 · volume wiki-data:/data'
+      }
+    }
+
+    desktopHost = node 'Desktop host (owner machine)' {
+      description 'Tauri app window + tray; embedded servers bound loopback by default: clip :19827, API :19828 (/api/v1); LAN access opt-in via bind-host setting; MCP entry bundled and toggled by apiConfig.mcpEnabled.'
+    }
+
+    devRun = node 'Dev run (worktree, web mode)' {
+      description 'node packages/server/src/index-v2.js from a git worktree; defaults PORT 19828 / HOST 127.0.0.1 / DATA_DIR ~/.llm-wiki-server / WEB_DIST dist-web (config.js). Observed during phase-1 acceptance: pid 2405816 serving 127.0.0.1:19828, /api/v2/health {ok, version 0.6.6, commands 72}.'
+    }
+  }
+
+  deployment.dockerHost.wikiContainer -> llmWiki.nodeServer 'runs index-v2.js'
+  deployment.dockerHost.wikiContainer -> serverDb '/data volume'
+  deployment.dockerHost.wikiContainer -> sharedStore '/data/stores'
+  deployment.desktopHost -> llmWiki.desktop 'runs'
+  deployment.devRun -> llmWiki.nodeServer 'runs index-v2.js'
+}

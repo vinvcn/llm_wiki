@@ -1,0 +1,127 @@
+// LLM Wiki — system context: actors, the system boundary, external systems,
+// and the shared data stores. Container internals live in the sibling files
+// (model-server.c4, model-client.c4, model-desktop.c4) via `extend`.
+
+model {
+
+  owner = person 'Owner' {
+    description 'Uses the app to build a personal knowledge wiki: imports sources, reviews generated pages, asks grounded questions. Also operates live acceptance sessions.'
+  }
+
+  llmWiki = system 'LLM Wiki' {
+    description 'Knowledge wiki generated from owner-provided documents: an ingest pipeline turns sources into typed wiki pages + embeddings; chat, search and graph answer from that corpus.'
+    technology 'npm-workspaces monorepo · v0.6.6'
+    metadata {
+      evidence 'package.json (name llm-wiki, version 0.6.6, workspaces packages/*)'
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // External systems (all evidenced by config/imports; live values from
+  // the 2026-08-05 runtime dump of app-state.json, secrets redacted)
+  // ------------------------------------------------------------------
+
+  llmProvider = external 'LLM provider' {
+    description 'Chat-completions or Anthropic-messages wire. Live config: provider=custom, apiMode=chat_completions, endpoint https://integrate.api.nvidia.com/v1, model nvidia/nemotron-3-super-120b-a12b, maxContextSize 128000. Ollama (localhost:11434) supported as alternate.'
+    technology 'OpenAI-compatible · Anthropic'
+    metadata {
+      evidence 'app-state.json llmConfig/providerConfigs · packages/server/src/llm-resolve.js (normalizeEndpoint, DEFAULT_ENDPOINTS) · src/lib/llm-providers.ts'
+    }
+  }
+
+  embeddingProvider = external 'Embedding provider' {
+    description 'OpenAI-compatible /embeddings endpoint. Live: https://integrate.api.nvidia.com/v1/embeddings, model nvidia/nemotron-3-embed-1b (dim 2048 in the live index), concurrency 1, batchSize 1.'
+    metadata {
+      evidence 'app-state.json embeddingConfig · packages/server/src/commands/search.js (embeddingFetch) · src/lib/embedding.ts'
+    }
+  }
+
+  mineru = external 'MinerU PDF extraction' {
+    description 'Optional high-quality PDF parse: cloud API https://mineru.net/api/v4 (Bearer token) or local mineru-api at http://127.0.0.1:8000. Disabled in the live deployment (mineruConfig.enabled=false); pipeline falls back to built-in pdfjs/pdfium extraction.'
+    metadata {
+      evidence 'packages/server/src/ingest/mineru.js:21-26 · app-state.json mineruConfig · src/lib/mineru.ts'
+    }
+  }
+
+  searchProviders = external 'Web search providers' {
+    description 'Provider fan-out for web search: searxng / tavily / serpapi / brave / bocha / firecrawl / ollama. Live config: provider=none (disabled).'
+    metadata {
+      evidence 'src/stores/wiki-store.ts (SearchProvider) · packages/server/src/commands/websearch.js · app-state.json searchApiConfig'
+    }
+  }
+
+  anytxt = external 'AnyTXT local search' {
+    description 'Local full-text search HTTP service, default endpoint http://127.0.0.1:9920. Disabled in the live deployment.'
+    metadata {
+      evidence 'app-state.json searchApiConfig.anyTxt · packages/server/src/commands/websearch.js'
+    }
+  }
+
+  mcpHost = external 'MCP client host' {
+    description 'Any MCP-capable agent host (Claude Desktop, Cursor, Claude Code, ...) connecting the bundled llm-wiki-mcp server over stdio. Gated by desktop Settings toggle apiConfig.mcpEnabled.'
+    metadata {
+      evidence 'mcp-server/src/index.ts (stdio) · src-tauri/src/lib.rs (mcp_server_entry_path)'
+    }
+  }
+
+  cliEngines = external 'Local CLI engines' {
+    description 'Locally installed claude / codex binaries spawned as alternative chat transports. Desktop: Rust commands; web mode: server-side cli.js. Events stream on claude-cli:{streamId} / codex-cli:{streamId} topics.'
+    metadata {
+      evidence 'src-tauri/src/commands/claude_cli.rs + codex_cli.rs · packages/server/src/cli.js:420-469'
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Shared data stores (drawn at context level: several containers use
+  // them; writers/readers are shown in the data-layer view)
+  // ------------------------------------------------------------------
+
+  serverDb = database 'server.db (SQLite)' {
+    description 'better-sqlite3, WAL journal, foreign_keys ON, 13 migrations tracked in _migrations. Tables: projects, users, settings, chat_sessions, chat_messages (with refs column), ingest_queue, reviews, graph_nodes/graph_edges (no writer in code), vec_meta; plus sqlite-vec vec_chunks virtual table (created lazily, recreated on dimension change).'
+    technology 'better-sqlite3 + sqlite-vec'
+    metadata {
+      evidence 'packages/server/src/store/db.js · runtime inspection 2026-08-05: ~/.llm-wiki-server/server.db and container /data/server.db'
+    }
+  }
+
+  sharedStore = filestore 'app-state.json' {
+    description 'Shared JSON settings store: the desktop Tauri plugin-store file when present, else DATA_DIR/stores/app-state.json. Holds llmConfig, providerConfigs, embeddingConfig, wikiSearchMode, mineruConfig, apiConfig, multimodalConfig, proxyConfig, sourceWatchConfig, scheduledImportConfig, searchApiConfig, projectRegistry, output language, theme.'
+    metadata {
+      evidence 'packages/server/src/store.js + config.js (SHARED_STORE_NAME, desktopStoreCandidateDirs) · src/lib/project-store.ts · runtime dump 2026-08-05'
+    }
+  }
+
+  projectDirs = filestore 'Project directories' {
+    description 'One folder per project (projects.path). Layout evidenced live: raw/sources + raw/assets (inputs); wiki/ generated pages in type dirs (entities, concepts, sources, queries, comparisons, synthesis, media) plus index.md/overview.md/log.md; .llm-wiki/ state (project.json, review.json, lint.json, ingest-cache.json, conversations.json, chats/, history/, page-history/, ingest-warnings.log). Live projects also contain .obsidian/ — the format is Obsidian-compatible.'
+    metadata {
+      evidence 'packages/server/src/store/project-paths.js · ingest/identity.js · runtime tree: /home/pc/wiki/fawe (2026-08-05)'
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Context-level relationships
+  // ------------------------------------------------------------------
+
+  owner -> llmWiki 'uses' {
+    technology 'browser (web mode) or desktop app'
+  }
+  owner -> mcpHost 'uses' 'delegates wiki tasks to an agent'
+  mcpHost -> llmWiki.mcpServer 'MCP over stdio'
+  llmWiki.nodeServer -> llmProvider 'chat + ingest LLM calls' 'streamCall / streamChat' 'OpenAI-compat or Anthropic wire'
+  llmWiki.nodeServer -> embeddingProvider 'embedPage / embeddingFetch'
+  llmWiki.nodeServer -> mineru 'PDF parse (optional stage)'
+  llmWiki.nodeServer -> searchProviders 'web.search tool'
+  llmWiki.nodeServer -> anytxt 'anytxt.search tool'
+  llmWiki.nodeServer -> serverDb 'SQL + sqlite-vec'
+  llmWiki.nodeServer -> sharedStore 'reads settings, writes via /api/store'
+  llmWiki.nodeServer -> projectDirs 'reads sources, writes wiki pages'
+  llmWiki.webClient -> llmProvider 'client-side LLM calls' 'desktop direct / web via /api/proxy'
+  llmWiki.desktop -> llmProvider 'Rust provider layer + CLI engines'
+  llmWiki.desktop -> cliEngines 'spawns claude / codex'
+  llmWiki.desktop -> projectDirs 'IPC fs commands, clip writes'
+  llmWiki.browserExtension -> llmWiki.desktop 'POST /clip' 'HTTP 127.0.0.1:19827'
+  llmWiki.mcpServer -> llmWiki.desktop 'HTTP /api/v1' '127.0.0.1:19828'
+
+  // The product runs two full backend stacks; see the dualBackends view.
+  llmWiki.nodeServer .parallel llmWiki.desktop 'same product jobs, two implementations (JS vs Rust)'
+}
