@@ -63,9 +63,27 @@ specification {
     notation 'Deployment node'
   }
 
+  // Audit finding anchored to the element(s) it concerns. Rendered amber so
+  // flags are visually distinct from the architecture itself; see
+  // ../README.md §Observations and the `flags` view.
+  element flag {
+    notation 'Observation / flag'
+    style {
+      shape document
+      color amber
+    }
+  }
+
   // Event / asynchronous flows (SSE frames, event bus, queues).
   relationship async {
     title 'events'
     line dotted
+  }
+
+  // Functionally equivalent implementations in the two backend stacks
+  // (Node web mode vs Tauri/Rust desktop). See the `dualBackends` view.
+  relationship parallel {
+    title 'parallel implementation'
+    line dashed
   }
 }

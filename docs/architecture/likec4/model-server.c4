@@ -6,14 +6,14 @@ model {
 
   extend llmWiki {
 
-    nodeServer = service 'Node Server (web mode)' {
+    nodeServer = service 'Node Server (web mode) :3000 docker / :19828 dev' {
       description 'Express 5 backend of the web deployment: serves the dist-web SPA and the /api/v2 REST + SSE API. Started by npm run start:web and by Docker (CMD node packages/server/src/index-v2.js). Boots SQLite, ingest orchestrator and chunked-upload sweeper.'
       technology 'Express 5 · helmet · cors · Zod validation via @llm-wiki/api-types'
       metadata {
         evidence 'packages/server/src/index-v2.js (boot block incl. startIngestOrchestrator, startChunkedUploadSweeper) · Dockerfile · runtime banner "LLM Wiki server v2 (Express + Zod)"'
       }
 
-      httpSurface = component 'HTTP surface & middleware' {
+      httpSurface = component 'HTTP surface & middleware [LIVE]' {
         description 'Chain: cors -> helmet(CSP off) -> /api/proxy inline auth -> express.json(64mb) -> authMiddleware -> routers -> error envelope. Public paths: /api/v2/health, /api/v2/version, /api/v2/auth/login, /api/v2/auth/status. Auth modes: none/open | token | auto (default); token via ?token=, x-llm-wiki-token header, or Bearer; env LLM_WIKI_AUTH_MODE / LLM_WIKI_API_TOKEN.'
         technology 'middleware/auth.js · error.js · project-lookup.js · validate.js · auth/config.js'
       }
@@ -58,12 +58,12 @@ model {
         }
       }
 
-      eventsSse = component 'Events / SSE' {
+      eventsSse = component 'Events / SSE [LIVE addSseClient · sse.js dormant]' {
         description 'Single global stream GET /api/v2/events (legacy addSseClient transport; events/sse.js SSEManager is dormant — zero importers). Envelope {event, payload}, ping heartbeat 25s. Bus EventTypes: file:created/modified/deleted, ingest:queued/progress/complete/error, chat:delta/toolStart/toolEnd/done, graph:updated, settings:changed; plus agent-event frames, file-sync:// topics, claude-cli/codex-cli stream topics.'
         technology 'events/bus.js · events.js · api/events.js'
       }
 
-      invokeBridge = component 'Invoke bridge (legacy)' {
+      invokeBridge = component 'Invoke bridge (legacy) [LIVE — primary client path]' {
         description 'POST /api/invoke/:command dispatching the ~72-command registry: fs, project, search (search_project, embedding_fetch), websearch, fileSync, vectorstore, maintenance, agent (agent_start_turn[_stream], cancel, sessions, skills), CLI transports, extractImages, opener, misc. Emits Deprecation/Warning headers under v2; primary command surface of the web client today.'
         technology 'invoke.js + commands/*'
         metadata {

@@ -9,8 +9,10 @@ restatement of the design docs. The narrative as-built record remains
 model complements it with diagrams that fail validation when they drift
 syntactically, and with per-element evidence metadata so drift can be audited.
 
-Current model: **56 elements · 90 relationships · 9 views (7 static + 2
+Current model: **64 elements · 120 relationships · 11 views (9 static + 2
 dynamic)**, authored against LikeC4 `1.59.2` and `v0.6.6` of this repo.
+Eight of the elements are amber **flag** nodes — audit findings anchored to
+the elements they concern (see §Observations and the `flags` view).
 
 ## Viewing and tooling
 
@@ -43,6 +45,7 @@ between LikeC4 releases.
 | `likec4/model-server.c4` | Node server container (`index-v2.js`, Express 5): 19 components — HTTP surface, v2 API routers, SSE, invoke bridge, proxy, OpenAPI doc, agent runtime + tools, ingest orchestrator + 14-stage pipeline, search + graph engines, store layer, worker pool, CLI transports — plus the legacy `index.js` v1 server. |
 | `likec4/model-client.c4` | Web client (React SPA, one codebase / two builds): app shell, chat panel, zustand state, v2 REST+SSE client, invoke transport + web shims, client LLM client, client-side pipelines. |
 | `likec4/model-desktop.c4` | Desktop surface (Tauri + Rust shell with its *parallel* backend stack: ~80 IPC commands, Rust agent runtime, LanceDB, `:19828` API server, `:19827` clip server, tray), MCP server, browser clipper, and deployment nodes. |
+| `likec4/model-flags.c4` | The 8 audit findings as amber `flag` elements, each wired to the element(s) it concerns — the diagrams' counterpart of §Observations below. |
 | `likec4/views.c4` | The 9 views below. Scoped views (`view of X`) double as drill-down targets in the served UI. |
 
 ## View guide
@@ -55,6 +58,8 @@ between LikeC4 releases.
 | `clientComponents` | Inside the React client: which panel talks to which transport, and the split between backend-agent turns and client-side LLM calls. |
 | `desktopSurface` | Tauri shell internals plus the MCP server and browser clipper, both of which target the **desktop** localhost servers, not the Node server. |
 | `dataLayer` | Who reads/writes `server.db`, `app-state.json`, and the project directories — the cross-backend data-sharing story. |
+| `dualBackends` | The two backend stacks side by side, functionally equivalent parts joined by dashed `parallel` edges (Express vs tiny_http, sqlite-vec vs LanceDB, ~72 vs ~80 commands). |
+| `flags` | Audit map: every observation as an amber flag node wired to where it lives. The visual index into §Observations. |
 | `chatFlow` (dynamic) | One grounded Q&A turn in web mode, steps 1–13, traced from the live 2026-08-05 session and cross-checked against `agent.js`/`events.js`. Includes the tool loop (`MAX_ITER 8`). |
 | `ingestFlow` (dynamic) | Source drop → wiki pages + embeddings, steps 1–16, with the optional MinerU and cache-hit branches; stage percents match `ingest/progress.js`. |
 | `deployment` | Observed runtime shapes: Docker container (`phase3-integration-llm-wiki-1`, healthy, `0.0.0.0:3000`), desktop host, and the dev worktree run. |
@@ -88,45 +93,114 @@ percents, table names). Sources used, in order of weight:
 
 ## Observations and flags
 
-Evidence gathered for the model surfaced these as-built facts. They are
-recorded here for traceability; each is also embedded in the relevant
-element description.
+The 2026-08-05 audit produced **8 findings**. Each is a first-class amber
+`flag` element in [`likec4/model-flags.c4`](likec4/model-flags.c4), wired to
+the element(s) it concerns and rendered in the `flags` view — the diagrams
+show *where* each observation lives. Below they are grouped by theme rather
+than listed flat: **structural** (designed this way), **vestige**
+(superseded code), **contract** (SSOT drift), **operational** (runtime UX).
+Every entry carries where-it-lives pointers and a verdict/next-step.
 
-1. **Two parallel backends.** The Tauri desktop shell embeds its own backend
-   (Rust agent runtime, LanceDB, RRF search, `tiny_http` API/clip servers)
-   parallel to the Node server's (JS agent runtime, sqlite-vec, RRF+graph
-   search, Express). The MCP server and browser clipper target the desktop
-   servers (`:19828`/`:19827`, `/api/v1`), not the Node `/api/v2` stack.
-2. **Invoke bridge carries the traffic.** Most web-client commands still flow
-   through legacy `invoke()` shims → `POST /api/invoke/:command` (72-command
-   registry); several typed v2 client functions (e.g. `startChat`,
-   `search`) have no production caller today.
-3. **Dormant SSE manager.** `events/sse.js` (`SSEManager`) has zero importers;
-   the live SSE transport is the legacy `addSseClient` path in `events.js`.
-4. **Vestigial graph tables.** `graph_nodes`/`graph_edges` (migration 008)
-   have no writer or reader in code; runtime rows: 0. The served graph is
-   built on the fly from `[[wikilinks]]` in `wiki/*.md`.
-5. **Port 19828 is intentionally shared.** The Node dev default and the
-   desktop API server both use it so the web client's default
-   `BACKEND=http://127.0.0.1:19828` works against either; running both on one
-   host collides (EADDRINUSE) by construction.
-6. **`/api/v1` only on the legacy entry.** `index-v2.js` does not mount v1;
-   only `index.js` (`npm run server`) does, for desktop-parity clients.
-7. **Dead/orphaned code spotted while tracing:** Milkdown is in
-   `package.json` but never imported (editor is a textarea);
-   `sweepResolvedReviews` has no production caller; client `mineru.ts` is
-   used only by the Settings connection test; `retrievalMode` is a dead
-   request field (search mode resolves from app-state `wikiSearchMode`);
-   `deep_research.run` is registered as an agent tool but rejected by the
-   loop (the client orchestrates deep research); worker-pool image
-   extraction is currently invoked on the main thread instead of the pool.
-8. **Contract nit:** `SearchResultSchema` in `packages/api-types` does not
-   line up field-for-field with the payload `commands/search.js` actually
-   returns (clients import the package type-only, so nothing fails at
-   runtime). Candidate for a follow-up issue.
-9. **Ingest progress persists only at stage boundaries**, so a healthy long
-   LLM call reads as a stuck queue row — tracked in issue #32 and noted in
-   the `ingestFlow` view description.
+### A. Structural — the dual-backend topology
+
+**A1 · Two parallel backends** — see `dualBackends` view; container-level
+`parallel` edge in `model.c4`.
+The Tauri desktop shell does not call the Node server; it ships a Rust
+implementation of the same jobs: agent loop (`src-tauri/src/agent/*` vs
+`packages/server/src/agent.js`), vector index (LanceDB vs sqlite-vec), HTTP
+API (`api_server.rs` `/api/v1` :19828 vs Express `/api/v2`), command
+registry (~80 IPC commands vs ~72 invoke commands). The stacks share only
+on-disk state (project dirs + `app-state.json`).
+*Why:* the desktop app is the original product; web mode (PR #1) added a
+parallel JS stack rather than reusing the Rust one. *Verdict:* product-level
+design decision, not a bug; unification is an open product question. The
+consequence to keep in mind: every server-side capability exists twice, and
+a fix on one side never reaches the other.
+
+**A2 · `/api/v1` only on the legacy entry** — `obsV1Legacy`.
+`index-v2.js` (the Docker CMD) never mounts `/api/v1`; only `index.js`
+(`npm run server`, route table `index.js:124-201`) does. The v1 consumers —
+MCP server and browser clipper — therefore reach the desktop servers only,
+never the deployed web server.
+*Verdict:* intentional topology. If MCP-against-Docker is ever wanted, this
+missing mount is the gap to close.
+
+**A3 · Port 19828 shared by design** — `obsSharedPort`.
+The desktop API server binds 19828 and the Node dev default `PORT` is also
+19828 (`config.js`), so the web client's hard-coded default
+`BACKEND=http://127.0.0.1:19828` works against either backend. Docker
+publishes 3000 (`0.0.0.0:3000->3000` in compose).
+*Verdict:* intentional convenience with a known price — running both on one
+host fails EADDRINUSE unless `PORT` is overridden. Document, don't silently
+"fix".
+
+### B. Traffic reality vs the typed surface
+
+**B1 · Invoke bridge is the live client path** — `obsInvokeBridge`.
+The web UI sends most commands through the legacy `invoke()` shim →
+`POST /api/invoke/:command` (72-command registry, `invoke.js`). The typed v2
+surface is partially ornamental: `startChat` (`src/api/chat.ts:74`) and
+`search` (`src/api/search.ts:52`) have zero production callers, while
+session CRUD and ingest REST are live.
+*Verdict:* migration debt; the v2 surface is the intended destination (#24).
+Practical rule when reading client code: `invoke('x')` in the web build is
+an HTTP call into the legacy registry.
+
+**B2 · Search schema drift → issue #38** — `obsSearchSchema` (contract).
+`SearchResultSchema` (`packages/api-types/src/schemas/search.ts`) declares
+`{path, score, snippet?, content?}`, but the live payload carries
+`{path, title, snippet, titleMatch, score, images, [vectorScore],
+[content]}` (`commands/search.js:338-342` keyword leg, `:213-221` vector
+leg). Zod parse strips unknown keys, so validating a real response silently
+drops fields.
+*Verdict:* filed as issue #38. Harmless today only because imports are
+type-only and search is not in the OpenAPI subset.
+
+### C. Vestiges — superseded, not deleted
+
+**C1 · Dormant SSE manager + stale comments** — `obsSseDormant`.
+`SSEManager` in `events/sse.js` has zero importers; `/api/v2/events`
+registers clients via `addSseClient` (`api/events.js:12,30`). Trap: comments
+at `events.js:11,44` still claim the opposite, so an editor picks the wrong
+file.
+*Verdict:* cleanup candidate — delete or wire the manager, and fix the
+comments either way.
+
+**C2 · Vestigial graph tables** — `obsGraphTables`.
+Migration `008_graph_nodes_edges` (`store/db.js:171`) created
+`graph_nodes`/`graph_edges`, but nothing writes or reads them (0 rows in
+both observed DBs); the served graph is built on the fly from
+`[[wikilinks]]` (`graph.js`).
+*Verdict:* dead-schema cleanup candidate; the as-built markdown-as-truth
+design is arguably the better one (keeps the vault Obsidian-compatible).
+
+**C3 · Orphan sweep, six items** — `obsOrphans`.
+1. `@milkdown/*` deps (`package.json:33-35`) never imported — the rich
+   editor never shipped, the textarea is the editor.
+2. `sweepResolvedReviews` (`src/lib/sweep-reviews.ts`) imported only by its
+   tests — no production caller.
+3. client `mineru.ts` used solely by the Settings connection test
+   (`mineru-section.tsx`).
+4. `retrievalMode` persisted in the chat store
+   (`src/stores/chat-store.ts:63`) but never sent to any backend — server
+   search mode resolves from app-state `wikiSearchMode`
+   (`commands/search.js:243-248`).
+5. `deep_research.run` registered with an executor
+   (`agent-tools.js:51,212-222`) but loop-rejected via
+   `LOOP_TOOL_REJECTIONS` (`agent.js:108`) — the client orchestrates deep
+   research.
+6. image extraction bypasses the worker pool built for it
+   (`ingest/pipeline.js`).
+*Verdict:* one tidy-up PR's worth; dangerous to copy from, harmless to run.
+
+### D. Operational
+
+**D1 · Ingest progress frozen mid-stage → issue #32** — `obsIngestProgress`.
+Percent persists only at stage boundaries (`touchIngestTask` +
+`ingest:progress` SSE); a healthy multi-minute analysis/generation call
+leaves the queue row unchanged, indistinguishable from a stuck run.
+*Verdict:* tracked in issue #32 (heartbeat). Operational takeaway: don't
+kill or retry "stuck" tasks prematurely.
 
 ## Maintenance rules
 
@@ -140,3 +214,6 @@ element description.
 - When this model, `PUSH1_ACTUAL_ARCHITECTURE.md`, and the code disagree,
   **code wins**; fix the model (and the prose doc) rather than letting both
   rot quietly.
+- Flags are elements: when a finding is resolved, delete its `flag` element
+  and edges in `likec4/model-flags.c4` and strike its entry here in the same
+  PR (link the resolving PR/issue in the commit message).

@@ -13,7 +13,7 @@ model {
       }
 
       uiShell = component 'App shell & views' {
-        description 'layout/: icon sidebar, file/knowledge trees, content area, preview/research/activity panels, update banner. Views: wiki editor (markdown textarea + preview + frontmatter panel + file history; Milkdown is in package.json but not imported — editor is a textarea), knowledge graph (graphology + sigma + forceAtlas2 layout worker, Louvain communities), sources tree (import/rescan/watch/delete/re-ingest), reviews triage, search results + image lightbox + vector-degradation notice, settings (16 sections: llm-provider, embedding, web-search, mineru, multimodal, api-server, scheduled-import, source-watch, maintenance, network, output, interface, general, skills, about, changelog), lint view, welcome/create-project.'
+        description 'layout/: icon sidebar, file/knowledge trees, content area, preview/research/activity panels, update banner. Views: wiki editor (markdown textarea + preview + frontmatter panel + file history; the @milkdown/* deps at package.json:33-35 are never imported — the rich editor never shipped, the textarea is the editor), knowledge graph (graphology + sigma + forceAtlas2 layout worker, Louvain communities), sources tree (import/rescan/watch/delete/re-ingest), reviews triage, search results + image lightbox + vector-degradation notice, settings (16 sections: llm-provider, embedding, web-search, mineru, multimodal, api-server, scheduled-import, source-watch, maintenance, network, output, interface, general, skills, about, changelog), lint view, welcome/create-project.'
         technology 'src/components/* · LoginScreen (web-only token login)'
       }
 
@@ -27,12 +27,12 @@ model {
         technology 'src/stores/* · src/lib/project-store.ts · persist.ts'
       }
 
-      v2Client = component 'v2 REST + SSE client' {
-        description 'src/api/*: typed fetch client, base = VITE_API_URL or same-origin, Bearer token from localStorage (llm-wiki-token). Covers projects, files, chat (start/cancel/writes/sessions), ingest (upload/enqueue/queue/retry/cancel), search+graph, settings, auth, events. EventSource on /api/v2/events with token as ?token= (EventSource cannot set headers), exponential reconnect 1s->30s. sse-sync gates on /api/v2/health then dispatches file:*, ingest:*, chat:*, graph:updated, settings:changed into the stores. Consumes @llm-wiki/api-types as type-only imports (runtime validation is server-side).'
+      v2Client = component 'v2 REST + SSE client [LIVE REST · typed chat/search unused]' {
+        description 'src/api/*: typed fetch client, base = VITE_API_URL or same-origin, Bearer token from localStorage (llm-wiki-token). Covers projects, files, chat (start/cancel/writes/sessions), ingest (upload/enqueue/queue/retry/cancel), search+graph, settings, auth, events. EventSource on /api/v2/events with token as ?token= (EventSource cannot set headers), exponential reconnect 1s->30s. sse-sync gates on /api/v2/health then dispatches file:*, ingest:*, chat:*, graph:updated, settings:changed into the stores. Consumes @llm-wiki/api-types as type-only imports (runtime validation is server-side). Live vs ornamental: projects/files/ingest/sessions/settings REST is used by the UI, but the typed startChat (src/api/chat.ts:74) and search (src/api/search.ts:52) have no production caller — chat and search traffic goes through invokeTransport instead.'
         technology 'src/api/* · src/lib/sse-sync.ts'
       }
 
-      invokeTransport = component 'Invoke transport + web shims' {
+      invokeTransport = component 'Invoke transport + web shims [LIVE — primary path]' {
         description 'Legacy command surface still carrying most traffic: desktop resolves invoke() to real Tauri IPC; the web build shims @tauri-apps/api/core invoke() to POST /api/invoke/:command (unwrapping {ok,result}), the store plugin to /api/store/:name/:key, and plugin-http to POST /api/proxy (same-origin passes through). Commands used from the client: fs read/write/list, search_project, embedding_fetch[_batch], web_search, anytxt_search, agent_start_turn[_stream]/cancel/list_skills, claude_cli_*, codex_cli_*. Also /api/home and /api/raw?path= streaming.'
         technology 'src/commands/* · src/web/* (core, http-api, store, http, dialog, opener, event, window, autostart)'
       }
@@ -43,7 +43,7 @@ model {
       }
 
       clientPipelines = component 'Client-side pipelines' {
-        description 'Substantial TS pipelines running in the client process (fs/invoke calls proxied to the server in the web build): deep-research (web/AnyTXT search -> synthesis -> writes wiki pages + embedPage), dedup merge queue (LLM duplicate detection, persistent queue in .llm-wiki/dedup-queue.json), scheduled import (interval scan of raw/sources -> enqueue via v2 REST), lint (structural + semantic/LLM), vision captioning, wikilink enrichment. Ingest execution itself is server-owned (the former browser ingest pipeline is gone). Orphaned/unwired findings: sweepResolvedReviews has no production caller; client mineru.ts is only used by the Settings connection test.'
+        description 'Substantial TS pipelines running in the client process (fs/invoke calls proxied to the server in the web build): deep-research (web/AnyTXT search -> synthesis -> writes wiki pages + embedPage), dedup merge queue (LLM duplicate detection, persistent queue in .llm-wiki/dedup-queue.json), scheduled import (interval scan of raw/sources -> enqueue via v2 REST), lint (structural + semantic/LLM), vision captioning, wikilink enrichment. Ingest execution itself is server-owned (the former browser ingest pipeline is gone). Orphaned/unwired findings: sweepResolvedReviews (src/lib/sweep-reviews.ts) is imported only by its tests, no production caller; client mineru.ts is only used by the Settings connection test; the chat store persists retrievalMode (src/stores/chat-store.ts:63) but nothing ever sends it to a backend.'
         technology 'src/lib/deep-research.ts · dedup*.ts · scheduled-import.ts · lint*.ts · vision-caption.ts'
       }
     }
@@ -61,9 +61,9 @@ model {
   llmWiki.webClient.clientPipelines -> llmWiki.webClient.v2Client 'scheduled import enqueue'
 
   // Client-to-backend relationships
-  llmWiki.webClient.v2Client -> llmWiki.nodeServer.httpSurface 'REST /api/v2'
+  llmWiki.webClient.v2Client -> llmWiki.nodeServer.httpSurface 'REST /api/v2 [LIVE: projects/files/ingest/sessions · typed chat+search unused]'
   llmWiki.webClient.v2Client .async llmWiki.nodeServer.eventsSse 'SSE /api/v2/events'
-  llmWiki.webClient.invokeTransport -> llmWiki.nodeServer.invokeBridge 'web build: POST /api/invoke'
+  llmWiki.webClient.invokeTransport -> llmWiki.nodeServer.invokeBridge 'web build: POST /api/invoke [LIVE — carries most commands]'
   llmWiki.webClient.invokeTransport -> llmWiki.desktop.ipcCommands 'desktop build: Tauri IPC'
   llmWiki.webClient.storesState -> sharedStore 'plugin-store file (desktop) · /api/store (web)'
   llmWiki.webClient.clientLlm -> llmProvider 'direct (desktop) · via /api/proxy (web)'

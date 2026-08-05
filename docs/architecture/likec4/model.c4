@@ -121,4 +121,7 @@ model {
   llmWiki.desktop -> projectDirs 'IPC fs commands, clip writes'
   llmWiki.browserExtension -> llmWiki.desktop 'POST /clip' 'HTTP 127.0.0.1:19827'
   llmWiki.mcpServer -> llmWiki.desktop 'HTTP /api/v1' '127.0.0.1:19828'
+
+  // The product runs two full backend stacks; see the dualBackends view.
+  llmWiki.nodeServer .parallel llmWiki.desktop 'same product jobs, two implementations (JS vs Rust)'
 }

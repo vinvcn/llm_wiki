@@ -7,6 +7,16 @@ views {
   view index {
     title 'LLM Wiki — system context'
     include *
+    // flags have their own view; keep the context map clean
+    exclude
+      obsInvokeBridge,
+      obsSseDormant,
+      obsGraphTables,
+      obsSharedPort,
+      obsV1Legacy,
+      obsOrphans,
+      obsSearchSchema,
+      obsIngestProgress
   }
 
   // ----------------------------------------------------------------
@@ -144,6 +154,70 @@ views {
     llmWiki.nodeServer.ingestPipeline -> serverDb 'vec_chunks upsert (sqlite-vec vec0, cosine)'
     llmWiki.nodeServer.ingestPipeline -> llmWiki.nodeServer.eventsSse 'ingest:progress at stage boundaries · ingest:complete / error'
     llmWiki.nodeServer.eventsSse -> llmWiki.webClient.v2Client 'SSE'
+  }
+
+  // ----------------------------------------------------------------
+  // Dual-backend mirror: the same product jobs implemented twice
+  // (JS web stack vs Rust desktop stack), joined by `parallel` edges.
+  // ----------------------------------------------------------------
+  view dualBackends {
+    title 'Dual backends — functional mirrors (JS web stack vs Rust desktop stack)'
+    description 'Dashed edges join functionally equivalent implementations. The stacks share only what is on disk: project directories and app-state.json. MCP and the clipper attach to the desktop side; the browser SPA to the Node side.'
+
+    include
+      llmWiki.nodeServer.httpSurface,
+      llmWiki.nodeServer.invokeBridge,
+      llmWiki.nodeServer.agentRuntime,
+      llmWiki.nodeServer.searchEngine,
+      llmWiki.nodeServer.storeLayer,
+      llmWiki.nodeServer.cliTransports,
+      llmWiki.desktop.apiServer,
+      llmWiki.desktop.clipServer,
+      llmWiki.desktop.ipcCommands,
+      llmWiki.desktop.rustAgent,
+      llmWiki.desktop.lanceDb,
+      serverDb,
+      sharedStore,
+      projectDirs
+  }
+
+  // ----------------------------------------------------------------
+  // Audit map: every observation as an amber flag node wired to the
+  // element(s) it concerns. Write-ups: ../README.md §Observations.
+  // ----------------------------------------------------------------
+  view flags {
+    title 'Observations & flags — audit findings anchored to their elements'
+    description 'Amber document nodes are findings from the 2026-08-05 audit (model-flags.c4); arrows point at where each one lives. Categories: structural (designed), vestige (superseded), contract (SSOT drift), operational (runtime UX).'
+
+    include
+      obsInvokeBridge,
+      obsSseDormant,
+      obsGraphTables,
+      obsSharedPort,
+      obsV1Legacy,
+      obsOrphans,
+      obsSearchSchema,
+      obsIngestProgress,
+      llmWiki.nodeServer,
+      llmWiki.legacyServer,
+      llmWiki.nodeServer.invokeBridge,
+      llmWiki.nodeServer.eventsSse,
+      llmWiki.nodeServer.graphEngine,
+      llmWiki.nodeServer.apiSearch,
+      llmWiki.nodeServer.agentTools,
+      llmWiki.nodeServer.workerPool,
+      llmWiki.nodeServer.openapiDoc,
+      llmWiki.nodeServer.ingestPipeline,
+      llmWiki.nodeServer.ingestOrchestrator,
+      llmWiki.desktop.apiServer,
+      llmWiki.mcpServer,
+      llmWiki.browserExtension,
+      llmWiki.webClient.invokeTransport,
+      llmWiki.webClient.v2Client,
+      llmWiki.webClient.uiShell,
+      llmWiki.webClient.clientPipelines,
+      llmWiki.webClient.storesState,
+      serverDb
   }
 
   // ----------------------------------------------------------------

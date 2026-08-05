@@ -75,6 +75,14 @@ model {
   llmWiki.mcpServer -> llmWiki.desktop.apiServer 'HTTP /api/v1 · Bearer token'
   llmWiki.browserExtension -> llmWiki.desktop.clipServer 'POST /clip (127.0.0.1:19827)'
 
+  // Functional mirrors across the two backend stacks (see dualBackends view).
+  llmWiki.nodeServer.httpSurface .parallel llmWiki.desktop.apiServer 'HTTP API: /api/v2 vs /api/v1'
+  llmWiki.nodeServer.invokeBridge .parallel llmWiki.desktop.ipcCommands 'command registry: ~72 vs ~80'
+  llmWiki.nodeServer.agentRuntime .parallel llmWiki.desktop.rustAgent 'chat agent loop'
+  llmWiki.nodeServer.searchEngine .parallel llmWiki.desktop.ipcCommands 'keyword + vector search'
+  llmWiki.nodeServer.storeLayer .parallel llmWiki.desktop.lanceDb 'vector index: sqlite-vec vs LanceDB'
+  llmWiki.nodeServer.cliTransports .parallel llmWiki.desktop.ipcCommands 'claude_cli / codex_cli transports'
+
   // ------------------------------------------------------------------
   // Deployment nodes (as observed 2026-08-05; ports/volumes from compose
   // file + docker inspect)
