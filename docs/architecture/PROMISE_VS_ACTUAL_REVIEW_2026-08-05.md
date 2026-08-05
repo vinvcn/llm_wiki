@@ -241,14 +241,14 @@ than bugs.
 
 | # | Action | Effort | Finding |
 |---|---|---|---|
-| R1 | File a cleanup issue for dead SQLite schema: `graph_nodes`/`graph_edges` (migration 008) **and** `reviews` (`db.js:142`) — drop in a new migration once their 0-row/no-reference status is re-confirmed on the owner's live data. | S | NF-1, D9 |
+| R1 | File a cleanup issue for dead SQLite schema: `graph_nodes`/`graph_edges` (migration 008) **and** `reviews` (`db.js:142`) — drop in a new migration once their 0-row/no-reference status is re-confirmed on the owner's live data. → **issue #39** | S | NF-1, D9 |
 | R2 | Append ledger entries (G18-style) to PUSH1 §7 for: SSE envelope/path rename (NF-3), worker-pool scope narrowing (NF-4), OpenAPI "documented subset" re-scoping (NF-5), legacy-entry retention with sunset condition (NF-7), chat stream shape (NF-8). | S | NF-3/4/5/7/8 |
 | R3 | Decide the MCP/v1 topology: either mount a v1-compatible surface on `index-v2.js` (makes charter §7 realizable against Docker) or annotate charter §7 + MCP docs to say desktop-only. | M (mount) / S (annotate) | NF-2, NF-7 |
 | R4 | Keep `V1_CHARTERED_ARCHITECTURE.md` pristine per house convention, but add one pointer line in its header blockquote to this review, so readers of the promise meet the premise-inversion (D6/S1) immediately. | XS | D6, S1 |
 | R5 | NF-6: accept client-side auxiliary pipelines as-is and fix PUSH1 §5 wording ("all *ingest and chat* LLM work is server-side"), or queue a server-side migration for deep-research/dedup/lint. Recommend: fix wording now, migrate opportunistically. | S | NF-6 |
 | R6 | Keep the LikeC4 model's flags in sync as R1–R3 land: delete each `flag` element + edges and strike its README entry in the resolving PR (per the model's maintenance rules). | XS each | — |
 
-**Done as part of this review:** R1's issue filed (link in PR), the
+**Done as part of this review:** issue #39 filed (R1), the
 `obsGraphTables` model flag extended to cover the `reviews` table, and R4's
 pointer added to the charter header (same commit as this document).
 
@@ -275,4 +275,4 @@ pointer added to the charter header (same commit as this document).
 Cross-references: [LikeC4 model + observations](./README.md) ·
 [PUSH1_ACTUAL_ARCHITECTURE.md](../PUSH1_ACTUAL_ARCHITECTURE.md) ·
 [V1_CHARTERED_ARCHITECTURE.md](../../V1_CHARTERED_ARCHITECTURE.md) ·
-issues #14 (closed), #19, #20, #21, #32, #38.
+issues #14 (closed), #19, #20, #21, #32, #38, #39.
