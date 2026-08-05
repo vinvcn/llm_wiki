@@ -20,8 +20,8 @@ model {
   }
   obsSseDormant -> llmWiki.nodeServer.eventsSse 'live transport is addSseClient'
 
-  obsGraphTables = flag 'OBS · graph_nodes/graph_edges vestigial (0 rows)' {
-    description 'Vestige: migration 008_graph_nodes_edges (packages/server/src/store/db.js:171) created the tables, but no code writes or reads them; runtime rows: 0 in both observed databases. The served graph is built on the fly from [[wikilinks]] in wiki/*.md (graph.js) — markdown is the source of truth, which also keeps the vault Obsidian-compatible.'
+  obsGraphTables = flag 'OBS · vestigial SQLite tables (graph_nodes/graph_edges + reviews)' {
+    description 'Vestige: migration 008_graph_nodes_edges (packages/server/src/store/db.js:171) created the graph tables and the reviews table was created at store/db.js:142, but no code writes or reads either; runtime rows: 0 in both observed databases. The served graph is built on the fly from [[wikilinks]] in wiki/*.md (graph.js); reviews live in .llm-wiki/review.json (api/reviews.js, api-v1.js:170). Markdown/file-as-truth keeps the vault Obsidian-compatible; the tables are dead schema.'
   }
   obsGraphTables -> llmWiki.nodeServer.graphEngine 'on-the-fly wikilink graph'
   obsGraphTables -> serverDb 'migration 008 tables, never populated'

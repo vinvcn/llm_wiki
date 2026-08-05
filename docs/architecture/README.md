@@ -166,13 +166,14 @@ file.
 *Verdict:* cleanup candidate — delete or wire the manager, and fix the
 comments either way.
 
-**C2 · Vestigial graph tables** — `obsGraphTables`.
+**C2 · Vestigial SQLite tables** — `obsGraphTables`.
 Migration `008_graph_nodes_edges` (`store/db.js:171`) created
-`graph_nodes`/`graph_edges`, but nothing writes or reads them (0 rows in
-both observed DBs); the served graph is built on the fly from
-`[[wikilinks]]` (`graph.js`).
-*Verdict:* dead-schema cleanup candidate; the as-built markdown-as-truth
-design is arguably the better one (keeps the vault Obsidian-compatible).
+`graph_nodes`/`graph_edges`, and `store/db.js:142` created `reviews`, but
+nothing writes or reads any of them (0 rows in both observed DBs). The
+served graph is built on the fly from `[[wikilinks]]` (`graph.js`); reviews
+live in `.llm-wiki/review.json` (`api/reviews.js`).
+*Verdict:* dead-schema cleanup candidate; the as-built file-as-truth design
+is arguably the better one (keeps the vault Obsidian-compatible).
 
 **C3 · Orphan sweep, six items** — `obsOrphans`.
 1. `@milkdown/*` deps (`package.json:33-35`) never imported — the rich
