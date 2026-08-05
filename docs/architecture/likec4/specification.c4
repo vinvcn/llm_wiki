@@ -1,0 +1,71 @@
+// LikeC4 notation for the LLM Wiki architecture model.
+//
+// Kinds are declared explicitly so the model renders the same way regardless
+// of which default notation a LikeC4 version ships with.
+//
+// Evidence convention: every element carries a `metadata.evidence` entry
+// naming the files (and where useful, runtime artifacts) the element was
+// derived from. See ../README.md for the full evidence record.
+
+specification {
+
+  element person {
+    style {
+      shape person
+    }
+  }
+
+  element system {
+    notation 'System'
+  }
+
+  element webapp {
+    notation 'Web application'
+    style {
+      shape browser
+    }
+  }
+
+  element desktop {
+    notation 'Desktop application'
+  }
+
+  element service {
+    notation 'Service / runtime process'
+  }
+
+  element component {
+    notation 'Component'
+    style {
+      shape component
+    }
+  }
+
+  element database {
+    notation 'Database'
+    style {
+      shape cylinder
+    }
+  }
+
+  element filestore {
+    notation 'File storage'
+    style {
+      shape storage
+    }
+  }
+
+  element external {
+    notation 'External system'
+  }
+
+  element node {
+    notation 'Deployment node'
+  }
+
+  // Event / asynchronous flows (SSE frames, event bus, queues).
+  relationship async {
+    title 'events'
+    line dotted
+  }
+}

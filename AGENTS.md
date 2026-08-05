@@ -34,4 +34,6 @@ index and report files are the durable, traceable record.
   typecheck + server tests.
 - Docs live in `docs/` (see `docs/PUSH1_ACTUAL_ARCHITECTURE.md` for the actual
   architecture and accepted deviations, `docs/API_REFERENCE.md`,
-  `docs/DEPLOYMENT.md`); design plans in `plans/`.
+  `docs/DEPLOYMENT.md`); the LikeC4 as-built architecture model lives in
+  `docs/architecture/likec4/` (guide + evidence record:
+  `docs/architecture/README.md`); design plans in `plans/`.
