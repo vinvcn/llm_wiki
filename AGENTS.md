@@ -5,19 +5,22 @@ Instructions for agents working in this repository.
 ## Owner acceptance records
 
 The owner performs live acceptance checks of the app (manual testing of real
-flows). **Every acceptance-check session must be recorded in
-[`docs/OWNER_ACCEPTANCE.md`](docs/OWNER_ACCEPTANCE.md)** — append a report at
-the bottom of its chronological Reports section, following the outline and
-writing rules defined at the top of that file:
+flows). **Every acceptance-check session is recorded in
+[`docs/owner-acceptance/`](docs/owner-acceptance/OWNER_ACCEPTANCE.md)** — one
+report file per session, named `YYYY-MM-DD_<kebab-slug>.md`, plus one row added
+to the chronological index table in
+[`docs/owner-acceptance/OWNER_ACCEPTANCE.md`](docs/owner-acceptance/OWNER_ACCEPTANCE.md).
+Follow the outline and writing rules defined in that index:
 
 - state the context the test ran against (commit, deployment, configuration),
-- list concrete scenarios tested with verdicts,
+- list concrete scenarios, each with description / testing done / verdict,
+- include facts, observations, and reproducible details, professionally,
 - record problems found, linking the corresponding issue/PR/commit when one
   exists (and filing one when it doesn't),
-- never rewrite past reports; add dated correction notes.
+- never rewrite merged reports; add dated correction notes.
 
 Acceptance findings must not live only in chat threads or PR comments — the
-doc is the durable, traceable record.
+index and report files are the durable, traceable record.
 
 ## Repository facts (short version)
 
