@@ -65,25 +65,34 @@ information):
 
 ### 2026-08-05 — Phase-1 acceptance (production-completeness, issue #14 closeout)
 
+*Consolidated report: supersedes the seed version merged with PR #34, expanded
+to the full session record per owner instruction.*
+
 **Context (what was tested):**
-- Tested commit: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) (= `origin/main`, merge of PR #31), served from the `doc-pass` worktree via `node packages/server/src/index-v2.js` at `http://127.0.0.1:19828`.
+- Tested commit: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) (= `origin/main` at session start, merge of PR #31), served from the `doc-pass` worktree via `node packages/server/src/index-v2.js` at `http://127.0.0.1:19828`.
 - Auth mode `open` (no token configured); data dir `~/.llm-wiki-server` with pre-existing owner data (migrations 010–013 applied).
 - LLM: custom OpenAI-compatible endpoint (NVIDIA integrate), `apiMode=chat_completions`; embedding endpoint configured (dim 2048); retrieval mode `hybrid` (`wikiSearchMode` in `app-state.json`).
-- Scope: live verification of the merged #14 gap closures — PRs [#22](https://github.com/vinvcn/llm_wiki/pull/22), [#23](https://github.com/vinvcn/llm_wiki/pull/23), [#25](https://github.com/vinvcn/llm_wiki/pull/25), [#27](https://github.com/vinvcn/llm_wiki/pull/27), [#28](https://github.com/vinvcn/llm_wiki/pull/28), [#29](https://github.com/vinvcn/llm_wiki/pull/29), [#30](https://github.com/vinvcn/llm_wiki/pull/30), [#31](https://github.com/vinvcn/llm_wiki/pull/31).
+- Scope: live acceptance of the eight merged #14 gap closures — PRs [#22](https://github.com/vinvcn/llm_wiki/pull/22), [#23](https://github.com/vinvcn/llm_wiki/pull/23), [#25](https://github.com/vinvcn/llm_wiki/pull/25), [#27](https://github.com/vinvcn/llm_wiki/pull/27), [#28](https://github.com/vinvcn/llm_wiki/pull/28), [#29](https://github.com/vinvcn/llm_wiki/pull/29), [#30](https://github.com/vinvcn/llm_wiki/pull/30), [#31](https://github.com/vinvcn/llm_wiki/pull/31). Session was interactive: the owner operated the app; the assistant traced each flow server-side (SQLite rows, logs, code paths).
 
 **Scenarios tested:**
-1. Retrieval-mode configuration — located Settings → Embeddings → "Retrieval mode" (keyword/vector/hybrid); value persisted as `wikiSearchMode` and honored by the server search API. PASS.
-2. Chat Q&A trace — question "hi, what is 声音选择": verified request validated by `ChatRequestSchema` (#23), session + user message persisted before streaming and answer + references persisted after (#25), token streaming via `agent-event`/`chat:delta` with terminal `chat:done` (#29), unauthenticated access under open auth (#22). Answer grounded in 5 wiki pages (references persisted). PASS.
-3. PDF upload → ingest end-to-end — "Harness engineering for coding agent users.pdf" (1.1 MB): multipart path (<10 MB), file complete in `raw/sources/`, queue row `pending→processing→completed` (task id 3, attempt 1, 4 min 56 s), pipeline stages 5→100%, wiki concept/entity pages + `index.md`/`log.md` written with clean frontmatter, sqlite-vec index populated (dim 2048) so hybrid's vector leg has data. PASS.
+1. Retrieval-mode configuration discovery (owner query) — located Settings → Embeddings → "Retrieval mode" (keyword/vector/hybrid); value persisted as `wikiSearchMode` and honored by the server search API; vector/hybrid require an embedding provider configured in the same section. PASS.
+2. Chat Q&A end-to-end — owner asked "hi, what is 声音选择" (session 1): `POST /api/v2/projects/:id/chat` validated by `ChatRequestSchema` (#23); `{runId, sessionId}` returned immediately; agent loop persisted the user message **before** streaming (`chat_messages` id 1, #25); `wiki.search` retrieval returned 5 grounded references (`tts音色系统.md`, `声音克隆受控机制.md`, `音色预设库.md`, `index.md`, `overview.md`); tokens streamed via `agent-event` + dual `chat:delta`, finalized by terminal `chat:done` (#29); assistant message + refs persisted (id 2); unauthenticated request under open auth (#22). PASS.
+3. Hybrid degrade behavior — at session start the project's vector index was empty (`vec_meta` 0 rows), so hybrid's vector leg contributed nothing and the answer's references came from the keyword leg only; correct degrade per the #27 health probe. Index populated later by scenario 5. PASS (noted).
+4. Ingest liveness observability — during scenario 5's generation leg (~3 min) the `ingest_queue` row flatlined at `progress=75` with frozen `updated_at`; 5–10 s polling could not distinguish a healthy run from a hung one (initially misdiagnosed as a task-stealing zombie process). FAIL (observability) → issue #32.
+5. PDF upload → ingest end-to-end — "Harness engineering for coding agent users.pdf" (1.1 MB): multipart path (<10 MB chunked threshold), file byte-complete in `raw/sources/`; task id 3, attempt 1; stages `preprocess 5 → mineru 15 → context 20 → cache-check 25 → images 30 → caption 40 → analysis 55 → generation 75 → write 85 → index-log 90 → reviews 92 → cache-save 95 → embed 98 → 100`; wiki concept/entity pages + `index.md`/`log.md` written with clean YAML frontmatter; `vec_meta` (dim 2048) written 12:10:49 local; row completed 12:11:03 (4 min 56 s). PASS.
+6. Multi-instance environment probe — a root-owned Docker container (`phase3-integration-llm-wiki-1`, `RestartPolicy: unless-stopped`, port 3000, own volume `/data`) initially looked like a second server sharing the queue; verified isolated (separate port + data volume), kill-and-respawn behavior explained; left running. Environmental; no code change.
+7. Session-closeout operations (not an app scenario; recorded for traceability) — root checkout screened and reset to `origin/main` (backup `/home/pc/llm-wiki-root-dirt-20260805/` with per-item `SCREENING.md`; preserved unmerged experiments: web↔desktop parity CI suite, `packages/server/src/clip-server.js`, `abortedLocally` chat-panel logic, overnight scheduler, `release.yml`); process docs produced (#33 → PR #34).
 
 **Problems found:**
-- Ingest progress is indistinguishable from a stuck run during long LLM calls: `ingest_queue.progress`/`updated_at` only update at stage boundaries, so a healthy generation leg reads as a flatlined row. Medium severity (observability; triggered a live incident investigation).
-- Environmental, not a code defect: a root-owned Docker container (`phase3-integration-llm-wiki-1`, `RestartPolicy: unless-stopped`) runs a second, isolated server on port 3000; its presence initially suggested a queue-stealing zombie. Resolved operationally (container left running; isolated data volume). No code change.
-- Note: at test start the project's vector index was empty, so `hybrid` correctly degraded to the keyword leg via the #27 health probe; scenario 3 later populated it.
+- Ingest heartbeat gap (scenario 4) — medium severity, issue #32.
+- Empty vector index at session start (scenario 3) — informational; degrade by design; resolved when scenario 5 populated the index.
+- Respawnable root container (scenario 6) — environmental confusion during the incident investigation, no code change.
+- No product defects found in the app itself this session.
 
 **Corresponding issues / PRs:**
-- issue: [#32](https://github.com/vinvcn/llm_wiki/issues/32) (ingest heartbeat gap).
-- Verified features: PRs #22, #23, #25, #27, #28, #29, #30, #31 (all merged; per-PR validation summaries on the PRs).
+- Filed from session: [#32](https://github.com/vinvcn/llm_wiki/issues/32) (ingest heartbeat).
+- Process artifacts of this session: [#33](https://github.com/vinvcn/llm_wiki/issues/33) → PR [#34](https://github.com/vinvcn/llm_wiki/pull/34) (this document, `AGENTS.md`, `CLAUDE.md`).
+- Verified features: PRs #22, #23, #25, #27, #28, #29, #30, #31 (all merged; per-PR validation summaries on the PRs). Scope anchor: [#14](https://github.com/vinvcn/llm_wiki/issues/14).
 
 **Commits:**
-- tested: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) · fixes: none in this session (issue #32 open).
+- tested: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) · produced this session: [`288657f`](https://github.com/vinvcn/llm_wiki/commit/288657fc3f001a343bac3b3fdbce9d5dbf396048) (#34) · fixes: none (issue #32 open).
