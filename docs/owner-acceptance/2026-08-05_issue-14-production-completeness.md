@@ -1,10 +1,9 @@
-# Owner Acceptance Report — 2026-08-05 · Phase-1 acceptance
+# Owner Acceptance Report — 2026-08-05 · Issue #14 production completeness
 
-*Phase-1 acceptance (production-completeness, issue #14 closeout). Consolidated
-report: supersedes the seed version merged with PR #34; rewritten to the
-strengthened rules (scenario description / testing done / verdict; facts,
-observations, reproducible details) per owner instruction. Indexed by
-[OWNER_ACCEPTANCE.md](OWNER_ACCEPTANCE.md).*
+*Phase-1 acceptance session. Consolidated report: supersedes the seed version
+merged with PR #34; rewritten to the strengthened rules (scenario description /
+testing done / verdict; facts, observations, reproducible details) per owner
+instruction. Indexed by [OWNER_ACCEPTANCE.md](OWNER_ACCEPTANCE.md).*
 
 **Context (what was tested):**
 - Tested commit: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) (= `origin/main` at session start, merge of PR #31), served from the `doc-pass` worktree via `node packages/server/src/index-v2.js` at `http://127.0.0.1:19828`.

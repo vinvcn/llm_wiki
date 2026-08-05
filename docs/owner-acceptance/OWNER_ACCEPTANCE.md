@@ -20,7 +20,7 @@ Each report file should follow this shape (adapt section names if needed, keep
 the information):
 
 ```markdown
-# Owner Acceptance Report — YYYY-MM-DD · <phase or session title>
+# Owner Acceptance Report — YYYY-MM-DD · <title: what is being tested>
 
 **Context (what was tested):**
 - commit / version under test (link), worktree or deployment it ran from,
@@ -87,8 +87,13 @@ YYYY-MM-DD_<kebab-slug>.md
 
 - `YYYY-MM-DD` — the session date (local), which keeps the directory and the
   index chronological by simple sort.
-- `<kebab-slug>` — short lowercase kebab-case session title (e.g.
-  `phase-1-acceptance`). Two sessions on one day get distinct slugs.
+- Every report has a **title** naming what is being tested — a general
+  statement of the change/feature/issue area under acceptance, not the session
+  mechanics.
+- `<kebab-slug>` — the kebab-case of that title (lowercase, spaces to `-`,
+  punctuation dropped): title "Issue #14 production completeness" →
+  `issue-14-production-completeness`. Two sessions on one day need distinct
+  titles, hence distinct slugs.
 - The index file itself is `OWNER_ACCEPTANCE.md`; report files are the only
   other files in this directory.
 
@@ -98,4 +103,4 @@ Chronological (date-first filenames sort as listed). One row per report file.
 
 | Date | Report | File | Verdicts | Key links |
 |---|---|---|---|---|
-| 2026-08-05 | Phase-1 acceptance (issue #14 closeout) | [2026-08-05_phase-1-acceptance.md](2026-08-05_phase-1-acceptance.md) | 5 PASS · 1 PARTIAL · 1 FAIL | [#14](https://github.com/vinvcn/llm_wiki/issues/14) · [#32](https://github.com/vinvcn/llm_wiki/issues/32) · tested [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) |
+| 2026-08-05 | Issue #14 production completeness | [2026-08-05_issue-14-production-completeness.md](2026-08-05_issue-14-production-completeness.md) | 5 PASS · 1 PARTIAL · 1 FAIL | [#14](https://github.com/vinvcn/llm_wiki/issues/14) · [#32](https://github.com/vinvcn/llm_wiki/issues/32) · tested [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) |

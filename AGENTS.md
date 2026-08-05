@@ -7,8 +7,9 @@ Instructions for agents working in this repository.
 The owner performs live acceptance checks of the app (manual testing of real
 flows). **Every acceptance-check session is recorded in
 [`docs/owner-acceptance/`](docs/owner-acceptance/OWNER_ACCEPTANCE.md)** — one
-report file per session, named `YYYY-MM-DD_<kebab-slug>.md`, plus one row added
-to the chronological index table in
+report file per session, named `YYYY-MM-DD_<kebab-slug>.md` (the slug is the
+kebab-case of the report title, which names what is being tested), plus one row
+added to the chronological index table in
 [`docs/owner-acceptance/OWNER_ACCEPTANCE.md`](docs/owner-acceptance/OWNER_ACCEPTANCE.md).
 Follow the outline and writing rules defined in that index:
 
