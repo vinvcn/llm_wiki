@@ -569,6 +569,12 @@ export function ChatPanel() {
   const activeRunSessionIdRef = useRef<string | null>(null)
   const activeRunIdRef = useRef<string | null>(null)
   const runIdRef = useRef(0)
+  // In-flight "New Chat" server-session creation (web build). handleSend
+  // awaits it when no conversation is active yet, so a message typed right
+  // after New Chat lands in the session the sidebar shows as active instead
+  // of a throwaway local conversation the late activation would strand.
+  const pendingNewChatRef = useRef<Promise<void> | null>(null)
+  const newChatSeqRef = useRef(0)
   const dismissedGeneratedOutputsKeyRef = useRef<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -647,7 +653,20 @@ export function ChatPanel() {
           })),
           ...localOnly,
         ])
-        const active = useChatStore.getState().activeConversationId
+        // Issue #26 (web build): mirror the desktop's hydrateProjectChatStore
+        // auto-open — when no conversation is active yet and shared server
+        // sessions exist (the list is most-recent-first), open the most
+        // recent one so a reload right after a chat — before the 2s
+        // conversations.json auto-save flush, or with a stale/missing file
+        // copy — never strands the pane on the empty "Start a new
+        // conversation" state even though sessions are shared and visible
+        // in the sidebar. An active conversation set meanwhile (user click,
+        // file hydration) is always respected.
+        let active = useChatStore.getState().activeConversationId
+        if (!active && sessions.length > 0) {
+          active = sessions[0].id
+          useChatStore.getState().setActiveConversation(active)
+        }
         if (active && serverIds.has(active)) {
           await loadSessionMessages(projectIdValue, active)
         }
@@ -852,8 +871,21 @@ export function ChatPanel() {
       const requestSkills = requestedSkillMode === "auto" && sendOptions.skills.length === 0
         ? Array.from(allowedSkills)
         : sendOptions.skills.filter((id) => allowedSkills.has(id))
-      // Auto-create a conversation if none is active
+      // Auto-create a conversation if none is active. If "New Chat" was
+      // just clicked, the server session id arrives asynchronously — defer
+      // to that session (the one the sidebar shows as active) instead of
+      // sending into a throwaway local conversation that the late
+      // activation would strand on an empty pane. The pending promise never
+      // rejects (its handler falls back to local creation on failure).
       let convId = useChatStore.getState().activeConversationId
+      if (!convId && pendingNewChatRef.current) {
+        try {
+          await pendingNewChatRef.current
+          convId = useChatStore.getState().activeConversationId
+        } catch {
+          convId = null
+        }
+      }
       if (!convId) {
         convId = createConversation()
       }
@@ -913,15 +945,18 @@ export function ChatPanel() {
           ])
           const visibleHistory = conversationMessages(convId)
             .filter((m) => m.role === "user" || m.role === "assistant")
-          // Desktop keeps the client-held history round-trip. In the web
-          // build history is server-owned (issue #21): the agent loop loads
-          // prior messages for sessionId from SQLite, so nothing is sent.
-          const activeConvMessages = IS_WEB_BUILD
-            ? []
-            : (sendOptions.historyOverride
-                ?? (sendOptions.suppressUserMessage ? visibleHistory : visibleHistory.slice(0, -1))
-              ).slice(-maxHistoryMessages)
-              .map((m) => ({ role: m.role, content: m.content }))
+          // Both builds keep the client-held history round-trip: the desktop
+          // (and now the web too) sends the conversation's messages from
+          // conversations.json — the SHARED on-disk record — so continuing a
+          // conversation started on the other client keeps its full context
+          // instead of an empty per-server store. The server hydrates from
+          // .llm-wiki/agent-sessions/<sessionId>.json only when a caller
+          // sends no explicit history (e.g. /api/v1/chat / MCP).
+          const activeConvMessages = (
+            sendOptions.historyOverride
+            ?? (sendOptions.suppressUserMessage ? visibleHistory : visibleHistory.slice(0, -1))
+          ).slice(-maxHistoryMessages)
+            .map((m) => ({ role: m.role, content: m.content }))
           let accumulated = ""
           const references: MessageReference[] = []
           const backendEvents: BackendAgentToolEvent[] = []
@@ -1136,18 +1171,25 @@ export function ChatPanel() {
                 },
                 topK: sendOptions.agentMode === "deep" ? 8 : 5,
                 includeContent: sendOptions.agentMode === "deep",
-                // Issue #21: the web build sends no history — the server
-                // loads it from SQLite by sessionId. `resume` marks
-                // continuation re-sends (shell approval / user-input
-                // answers) whose scaffolding message must not persist;
-                // historyLimit carries the user's context-window setting.
+                // Cross-client history round-trip (client-held
+                // conversations.json on BOTH builds; historyExplicit mirrors
+                // the desktop contract so the server never hydrates stale
+                // session files into a fresh conversation). `resume` /
+                // `regenerate` / `historyLimit` stay web-only extras the
+                // desktop runtime ignores: resume marks approval/user-input
+                // continuation re-sends whose scaffolding message must not
+                // persist twice, regenerate drops the persisted last
+                // exchange first, historyLimit mirrors the user's
+                // context-window setting.
+                history: activeConvMessages,
+                historyExplicit: true,
                 ...(IS_WEB_BUILD
                   ? {
                       resume: !!sendOptions.suppressUserMessage,
                       regenerate: !!sendOptions.regenerate,
                       historyLimit: maxHistoryMessages,
                     }
-                  : { history: activeConvMessages, historyExplicit: true }),
+                  : {}),
                 skills: requestSkills,
                 contextFiles: sendOptions.contextFiles,
                 skillMode: requestedSkillMode,
@@ -1419,9 +1461,17 @@ export function ChatPanel() {
     if (IS_WEB_BUILD && project) {
       // Server owns the session id; fall back to local creation (the agent
       // loop then creates the session lazily on first turn) if unreachable.
+      // The creation promise is exposed to handleSend via
+      // pendingNewChatRef: a user that types immediately (before the server
+      // round-trip resolves) must land in THIS session — not in a throwaway
+      // local conversation the late activation would strand on an empty
+      // pane (the browser-chat gate caught exactly that race).
       const projectIdForApi = project.id
-      void createChatSession(projectIdForApi, t("chat.newConversation"))
-        .then(({ session }) => {
+      const activeAtClick = useChatStore.getState().activeConversationId
+      const mySeq = ++newChatSeqRef.current
+      const pending = (async () => {
+        try {
+          const { session } = await createChatSession(projectIdForApi, t("chat.newConversation"))
           const store = useChatStore.getState()
           store.upsertConversation({
             id: session.id,
@@ -1430,12 +1480,24 @@ export function ChatPanel() {
             updatedAt: session.updatedAt,
           })
           store.setMessagesForConversation(session.id, [])
-          store.setActiveConversation(session.id)
-        })
-        .catch((err) => {
+          // Activate only when this is still the latest New Chat AND the
+          // user has not selected another conversation meanwhile (don't
+          // steal focus mid-load, mirroring hydrateProjectChatStore).
+          if (
+            newChatSeqRef.current === mySeq &&
+            useChatStore.getState().activeConversationId === activeAtClick
+          ) {
+            store.setActiveConversation(session.id)
+          }
+        } catch (err) {
           console.warn("[chat] server session create failed, creating locally:", err)
-          createConversation()
-        })
+          if (!useChatStore.getState().activeConversationId) createConversation()
+        }
+      })()
+      pendingNewChatRef.current = pending
+      void pending.finally(() => {
+        if (newChatSeqRef.current === mySeq) pendingNewChatRef.current = null
+      })
     } else {
       createConversation()
     }
