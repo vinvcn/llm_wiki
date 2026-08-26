@@ -19,14 +19,28 @@ export const ChatRequestSchema = z.object({
   topK: z.number().int().min(1).max(50).optional().default(5),
   includeContent: z.boolean().optional().default(false),
   skills: z.array(z.string()).optional().default([]),
-  // Issue #21: history is no longer client-held. The server loads prior
-  // messages from chat_messages by sessionId. Three knobs remain:
+  // Cross-client history round-trip (the "one backend, one user data"
+  // contract, mirroring the desktop runtime): both builds send the
+  // client-held conversations.json history with historyExplicit: true, and
+  // the server feeds exactly that to the model — continuing a conversation
+  // started on the other client keeps its full context. When history is
+  // omitted (or empty and not explicit — e.g. the MCP /api/v1 chat), the
+  // server hydrates the last 12 messages from the shared on-disk session
+  // store (.llm-wiki/agent-sessions/<sessionId>.json, desktop AgentSession
+  // serde shape) and falls back to chat_messages for legacy sessions.
+  history: z.array(z.object({
+    role: z.enum(["user", "assistant"]),
+    content: z.string(),
+  })).optional(),
+  historyExplicit: z.boolean().optional().default(false),
+  // Web-only extras (the desktop runtime ignores unknown fields):
   // - resume: marks an approval-boundary re-send; the user message is already
   //   persisted from the original turn, so the server must not persist it again.
   // - regenerate: the client is re-running the last user turn. The server
   //   drops the session's last user/assistant exchange before running, so the
   //   re-persisted user message and the fresh answer replace the old pair.
-  // - historyLimit: how many prior messages the agent loop feeds the model.
+  // - historyLimit: how many prior messages the agent loop feeds the model
+  //   when hydrating.
   resume: z.boolean().optional().default(false),
   regenerate: z.boolean().optional().default(false),
   historyLimit: z.number().int().min(1).max(100).optional(),
