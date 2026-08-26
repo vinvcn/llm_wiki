@@ -10,9 +10,19 @@ import { readStore, writeStore, readStoreKey, writeStoreKey, deleteStoreKey, get
 import { addSseClient, clientCount, emit } from "./events.js"
 import { EventTypes } from "./events/bus.js"
 import { handleProxy } from "./proxy.js"
+import { applyProxyFromStore, resolveProxyStorePath } from "./proxy-env.js"
 import { handleApiV1 } from "./api-v1.js"
+import { exitOnBindFailure } from "./listen-guard.js"
+import { startClipServer, getClipStatus, CLIP_PORT } from "./clip-server.js"
+import { getDb } from "./store/db.js"
 
 ensureDataDirs()
+// Initialize the shared database (migrations on first boot) so the vector
+// store / chat-session / graph surfaces are live from the start — mirroring
+// the v2 entrypoint. Without this, commands that probe `isVecAvailable()`
+// before their first `getDb()` call would silently degrade to keyword-only
+// retrieval for the whole process lifetime.
+getDb()
 
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -206,12 +216,36 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
+// Apply the shared-store proxy config at boot, exactly like the Rust
+// setup hook (read_proxy_config_from_store + apply_proxy_env).
+const bootProxyStorePath = resolveProxyStorePath()
+const bootProxySummary = applyProxyFromStore()
+
+// The Chrome Web Clipper companion (port 19827 by default) — same protocol
+// as the desktop's clip_server.rs, so the unmodified extension works here.
+startClipServer()
+
+// Main-listener bind failures (same-host topology: the DESKTOP app owns
+// :19828 while it runs) must exit fast with an actionable diagnosis — never
+// a raw "Unhandled 'error' event" crash trace.
+server.on("error", (err) => exitOnBindFailure(err, { port: PORT, host: HOST, entry: "index.js" }))
+
 server.listen(PORT, HOST, () => {
   const shown = HOST === "0.0.0.0" ? "localhost" : HOST
   console.log(`\n  LLM Wiki server (web client + backend)`)
   console.log(`  ▸ Local:    http://${shown}:${PORT}`)
   if (HOST === "0.0.0.0") console.log(`  ▸ Network:  http://<your-ip>:${PORT}`)
+  // Desktop setup-hook log parity (src-tauri/src/lib.rs): name the store file
+  // read and the applied summary (or the no-config line).
+  console.log(`[proxy] reading from ${bootProxyStorePath}`)
+  if (bootProxySummary !== null) {
+    console.log(`[proxy] ${bootProxySummary}`)
+    console.log(`  ▸ Proxy:     ${bootProxySummary}`)
+  } else {
+    console.log(`[proxy] no proxyConfig in store, requests go direct`)
+  }
   console.log(`  ▸ Commands: ${commandNames().length} registered`)
+  console.log(`  ▸ Clipper:  companion listener on ${HOST}:${CLIP_PORT} (Chrome extension; status: ${getClipStatus()})`)
   console.log(`  ▸ Web build: ${fs.existsSync(path.join(WEB_DIST, "index.html")) ? WEB_DIST : "MISSING — run: npm run build:web"}`)
   console.log(`  ▸ Data dir:  ${process.env.LLM_WIKI_DATA_DIR || path.join(os.homedir(), ".llm-wiki-server")}\n`)
 })

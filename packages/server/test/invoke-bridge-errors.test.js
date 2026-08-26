@@ -111,4 +111,28 @@ describe("legacy /api/invoke bridge error handling", () => {
     expect(res.body.result.path).toBeDefined()
     expect(res.body.result.path.endsWith("valid-proj")).toBe(true)
   })
+
+  it("set_proxy_env rejects wrong-typed config with the desktop's arg error", async () => {
+    const res = await request(app)
+      .post("/api/invoke/set_proxy_env")
+      .send({ config: { enabled: "yes" } })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe("VALIDATION_ERROR")
+    expect(res.body.error.message).toMatch(/Invalid proxy config: enabled must be a boolean/)
+  })
+
+  it("set_close_behavior normalizes + echoes the value (desktop lib.rs port)", async () => {
+    const okRes = await request(app)
+      .post("/api/invoke/set_close_behavior")
+      .send({ value: "minimize" })
+    expect(okRes.status).toBe(200)
+    expect(okRes.body.result).toBe("minimize")
+
+    const badRes = await request(app)
+      .post("/api/invoke/set_close_behavior")
+      .send({ value: "bogus" })
+    expect(badRes.status).toBe(400)
+    expect(badRes.body.error.code).toBe("VALIDATION_ERROR")
+    expect(badRes.body.error.message).toBe("Invalid close behavior: bogus")
+  })
 })

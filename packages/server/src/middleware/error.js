@@ -46,6 +46,15 @@ export function errorHandler(err, req, res, _next) {
       },
     })
   }
+  // body-parser failed to parse the request JSON (express.json strict:false
+  // still rejects malformed bodies with type "entity.parse.failed"). The
+  // legacy server answered "Invalid JSON body" 400 — keep that contract for
+  // the invoke/store surfaces instead of leaking a scrubbed 500.
+  if (err && err.type === "entity.parse.failed") {
+    return res.status(statusForCode(ErrorCode.VALIDATION_ERROR)).json({
+      error: { code: ErrorCode.VALIDATION_ERROR, message: "Invalid JSON body", details: null },
+    })
+  }
   // Unexpected. Log server-side (with stack) but return a scrubbed envelope.
   console.error("[v2] unhandled error:", err)
   return res.status(500).json({

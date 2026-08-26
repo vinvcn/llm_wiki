@@ -37,8 +37,15 @@ import chatRouter from "./api/chat.js"
 import ingestRouter from "./api/ingest.js"
 import storeRouter from "./api/store.js"
 import { handleProxy } from "./proxy.js"
+import { handleApiV1 } from "./api-v1.js"
+import { exitOnBindFailure } from "./listen-guard.js"
+import { streamRawFile } from "./raw.js"
+import { startClipServer, getClipStatus, CLIP_PORT } from "./clip-server.js"
+import { getStoreDiagnostics } from "./store.js"
+import { sseManager } from "./events/sse.js"
 import { generateOpenApiDocument } from "./openapi.js"
 import { startIngestOrchestrator } from "./ingest/orchestrator.js"
+import { applyProxyFromStore, resolveProxyStorePath } from "./proxy-env.js"
 import { startChunkedUploadSweeper } from "./uploads/chunked.js"
 
 // Initialize data directories and database (runs migrations on first boot)
@@ -65,6 +72,48 @@ app.post("/api/proxy", (req, res, next) => {
   return handleProxy(req, res)
 })
 
+// ── desktop external REST API (/api/v1/*) ─────────────────────────────────
+// Server port of the desktop's api_server.rs (handleApiV1 in api-v1.js), so
+// the bundled MCP server and the external agent skill work against the web
+// backend unchanged. Mounted BEFORE express.json (handleApiV1 parses the raw
+// body string itself, mirroring the legacy readBody) and BEFORE the v2 auth
+// middleware — exactly like the legacy server and the desktop, where /api/v1
+// enforces its OWN auth contract (shared-store apiConfig.token or
+// LLM_WIKI_API_TOKEN via ?token= / x-llm-wiki-token / Authorization: Bearer).
+const MAX_BODY_BYTES = 64 * 1024 * 1024 // 64 MB, same cap as the legacy server
+function readRawBody(req, res, next) {
+  if (!(req.method === "POST" || req.method === "PUT" || req.method === "PATCH")) {
+    return next(null, null)
+  }
+  const chunks = []
+  let size = 0
+  req.on("data", (chunk) => {
+    size += chunk.length
+    if (size > MAX_BODY_BYTES) {
+      res.status(413).json({ error: { code: "VALIDATION_ERROR", message: "Request body too large", details: null } })
+      req.destroy()
+      return
+    }
+    chunks.push(chunk)
+  })
+  req.on("end", () => next(null, Buffer.concat(chunks).toString("utf-8")))
+  req.on("error", (err) => next(err, null))
+}
+app.all("/api/v1/*splat", (req, res, next) => {
+  readRawBody(req, res, (err, body) => {
+    if (err) return next(err)
+    const sendJson = (status, val) => res.status(status).json(val)
+    return handleApiV1({
+      method: req.method,
+      pathname: req.path,
+      searchParams: new URL(req.originalUrl, "http://localhost").searchParams,
+      headers: req.headers,
+      body,
+      sendJson,
+    })
+  })
+})
+
 app.use(express.json({ limit: "64mb", strict: false }))
 app.use(authMiddleware)
 
@@ -79,6 +128,35 @@ app.get("/api/v2/version", (req, res) => {
 
 app.get("/api/v2/openapi.json", (req, res) => {
   res.json(generateOpenApiDocument())
+})
+
+// ── legacy /api/raw (web convertFileSrc: wiki images, file previews) ──────
+// The web shim's convertFileSrc (src/web/core.ts) builds /api/raw?path=<abs>
+// URLs for <img>/<a> tags. Faithful port of the legacy handler (raw.js).
+// Sits AFTER the auth middleware, so token mode accepts ?token= /
+// Bearer / x-llm-wiki-token like every other /api route (the shim appends
+// ?token= via authedUrl); open mode (the default) passes through.
+app.get("/api/raw", (req, res, next) => streamRawFile(req, res).catch(next))
+
+// ── legacy /api/health + /api/commands (diagnostics, shared-store probe) ──
+// Same payload shape as the legacy server: /api/health is how operators (and
+// the shared-data harness) check whether the web server adopted the desktop's
+// plugin-store file (store.shared / store.source). Kept behind the auth
+// middleware in token mode (it discloses the store path); open mode = legacy
+// behavior.
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    name: "llm-wiki-server",
+    commands: commandNames().length,
+    sseClients: sseManager.getClientCount(),
+    webDist: WEB_DIST,
+    webBuilt: fs.existsSync(path.join(WEB_DIST, "index.html")),
+    store: getStoreDiagnostics(),
+  })
+})
+app.get("/api/commands", (req, res) => {
+  res.json(commandNames())
 })
 
 // ── legacy /api/home (web file-picker default path) ───────────────────────
@@ -209,13 +287,43 @@ app.use(errorHandler)
 // Only start the server when this module is run directly (not when imported by tests)
 let server = null
 if (import.meta.url === `file://${process.argv[1]}`) {
-  server = app.listen(PORT, HOST, () => {
+  // Apply the shared-store proxy config at boot, exactly like the Rust
+  // setup hook (read_proxy_config_from_store + apply_proxy_env) — so
+  // "Settings → Network" takes effect for the web server's own outbound
+  // calls and /api/proxy without waiting for a Settings save.
+  const proxyStorePath = resolveProxyStorePath()
+  const proxySummary = applyProxyFromStore()
+  // The Chrome Web Clipper companion (port 19827 by default) — same protocol
+  // as the desktop's clip_server.rs, so the unmodified extension works here.
+  startClipServer()
+  server = app.listen(PORT, HOST, (err) => {
+    if (err) {
+      // Express 5 delivers bind failures to the listen CALLBACK; diagnose
+      // and exit(1) — never print the success banner or linger as a zombie
+      // while the desktop app owns :19828.
+      exitOnBindFailure(err, { port: PORT, host: HOST, entry: "index-v2.js" })
+      return
+    }
     console.log(`\n  LLM Wiki server v2 (Express + Zod)`)
     console.log(`  ▸ Local:    http://${HOST}:${PORT}`)
+    // Desktop setup-hook log parity (src-tauri/src/lib.rs): name the store
+    // file read and the applied summary (or the no-config line).
+    console.log(`[proxy] reading from ${proxyStorePath}`)
+    if (proxySummary !== null) {
+      console.log(`[proxy] ${proxySummary}`)
+      console.log(`  ▸ Proxy:     ${proxySummary}`)
+    } else {
+      console.log(`[proxy] no proxyConfig in store, requests go direct`)
+    }
     console.log(`  ▸ Commands: ${commandNames().length} registered`)
+    console.log(`  ▸ Clipper:  companion listener on ${HOST}:${CLIP_PORT} (Chrome extension; status: ${getClipStatus()})`)
     console.log(`  ▸ API:      /api/v2/* (new) + /api/invoke/* (legacy)`)
     console.log(`  ▸ Web build: ${fs.existsSync(WEB_INDEX) ? WEB_DIST : "MISSING — run: npm run build:web"}\n`)
   })
+  // Belt-and-braces: some Express versions surface the same bind failure on
+  // the http.Server 'error' event instead of the callback. exitOnBindFailure
+  // is idempotent, so a double delivery prints ONE diagnosis and exits once.
+  server.on("error", (err) => exitOnBindFailure(err, { port: PORT, host: HOST, entry: "index-v2.js" }))
   // Server-driven ingest (issue #14 P0): start consuming the ingest queue.
   // Called ONLY in the boot block — the orchestrator module is import-safe,
   // so test imports of `app` never start its sweep timer or touch the queue.

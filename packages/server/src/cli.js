@@ -325,6 +325,43 @@ export function mergeSystemPreamble(content, preamble) {
 
 // ── Subprocess plumbing ───────────────────────────────────────────────────
 
+/** Write + end stdin the way the Rust sides do (write_all -> flush ->
+ *  drop(stdin)), mapping a prematurely-closed pipe to the desktop's
+ *  "Failed to write to <label> stdin: ..." error string instead of letting
+ *  the stream's 'error' event crash the server process. The first failure
+ *  settles the promise; later writes stop (mirrors Rust ? on write_all).
+ */
+/** @type {(child: import("node:child_process").ChildProcess, data: string, label: string) => Promise<void>} */
+export function writeToStdin(child, data, label) {
+  return new Promise((resolve, reject) => {
+    // Keep the listener attached for the stream's lifetime: a dying CLI can
+    // surface EPIPE both via the 'error' event and the write callback, and
+    // removing the listener after the first would let the second crash the
+    // server as an uncaught exception.
+    let settled = false
+    const fail = (err) => {
+      if (settled) return
+      settled = true
+      reject(new Error(`Failed to write to ${label} stdin: ${err?.message ?? String(err)}`))
+    }
+    child.stdin.on("error", fail)
+    child.stdin.write(data, (err) => {
+      if (err) fail(err)
+      else {
+        settled = true
+        resolve()
+      }
+    })
+  })
+}
+
+function endStdin(child) {
+  // Rust drops(stdin) after flush and ignores any late write failures; mirror
+  // that by swallowing post-termination EPIPE noise from the closing stream.
+  child.stdin.on("error", () => {})
+  return new Promise((resolve) => child.stdin.end(() => resolve()))
+}
+
 function spawnChild(binPath, args, opts, label) {
   return new Promise((resolve, reject) => {
     const child = spawn(binPath, args, opts)
@@ -364,16 +401,33 @@ const STDOUT_LIMIT_BYTES = 1024 * 1024
 const STDERR_LIMIT_BYTES = 1024 * 1024
 
 function appendCappedLine(state, line, limitBytes) {
-  if (Buffer.byteLength(state.text, "utf8") >= limitBytes) return
-  const candidate = state.text + line
-  if (Buffer.byteLength(candidate, "utf8") > limitBytes) {
-    // Truncate to the byte cap without appending a newline (matches Rust,
-    // which only adds '\n' while still under the limit).
-    state.text = Buffer.from(candidate, "utf8").subarray(0, limitBytes).toString("utf8")
-  } else {
-    state.text = candidate + "\n"
+  // Faithful port of codex_cli.rs::append_capped_line: append whole chars
+  // while they fit under the byte cap, then append '\n' only while the
+  // result stays strictly under the cap (an exact fit gets no newline).
+  // Truncating raw bytes instead can split a UTF-8 sequence mid-char.
+  //
+  // The byte length is tracked incrementally on `state.bytes` instead of
+  // re-encoding the whole accumulated string per char (Buffer.byteLength is
+  // O(n), so the naive loop is O(n^2) and freezes the event loop for
+  // minutes on a single huge CLI line — e.g. 1 MiB of codex stdout).
+  let bytes = state.bytes
+  if (typeof bytes !== "number") bytes = Buffer.byteLength(state.text, "utf8")
+  if (bytes >= limitBytes) return
+  for (const ch of line) {
+    const charBytes = Buffer.byteLength(ch, "utf8")
+    if (bytes + charBytes > limitBytes) break
+    state.text += ch
+    bytes += charBytes
   }
+  if (bytes < limitBytes) {
+    state.text += "\n"
+    bytes += 1
+  }
+  state.bytes = bytes
 }
+
+/** @type {(state: {text: string}, line: string, limitBytes: number) => void} */
+export { appendCappedLine }
 
 // Running children keyed by frontend-generated stream id.
 const claudeChildren = new Map()
@@ -412,9 +466,9 @@ async function claudeCliSpawn(args) {
 
   // stream-json input: one JSON event per line; content MUST be a block array.
   for (const [role, content] of turns) {
-    child.stdin.write(JSON.stringify({ type: role, message: { role, content } }) + "\n")
+    await writeToStdin(child, JSON.stringify({ type: role, message: { role, content } }) + "\n", "claude")
   }
-  child.stdin.end()
+  await endStdin(child)
 
   claudeChildren.set(streamId, child)
   const topic = `claude-cli:${streamId}`
@@ -458,8 +512,8 @@ async function codexCliSpawn(args) {
     cwd, env: spawnEnv(), stdio: ["pipe", "pipe", "pipe"],
   }, "codex")
 
-  child.stdin.write(prompt)
-  child.stdin.end()
+  await writeToStdin(child, prompt, "codex")
+  await endStdin(child)
 
   const run = { child, timer: null, timedOut: false }
   codexChildren.set(streamId, run)
