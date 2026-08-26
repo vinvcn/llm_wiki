@@ -109,7 +109,7 @@ performs a few maintenance flows (dedup/re-index) through the legacy bridge.
 
 ### 2a. SQLite — `server.db` (under `LLM_WIKI_DATA_DIR`, `/data` in Docker)
 
-Relational **metadata**. Live schema (13 migrations applied):
+Relational **metadata**. Live schema (15 migrations applied):
 
 | Table | Purpose | Status |
 |---|---|---|
@@ -117,10 +117,10 @@ Relational **metadata**. Live schema (13 migrations applied):
 | `users` | Local user accounts (username, password_hash) | used |
 | `settings` | Per-user key/value settings | used |
 | `ingest_queue` | Ingest task queue consumed by the server orchestrator (`pending → processing → completed/failed`; attempt_count, error, not_before for retry/usage-limit deferral) | used |
-| `reviews` | Review items (type, title, status) | used |
+| `reviews` | Review items (type, title, status) | **dropped by migration `015`** — reviews are file-backed (`.llm-wiki/review.json`; see §7, G13 closing note) |
 | `chat_sessions` | Chat session metadata (uuid, project_id, title, timestamps) | used |
 | `chat_messages` | Chat message history (role, content, references JSON) | used |
-| `graph_nodes` / `graph_edges` | Knowledge-graph cache (path, title, type, link_count; weighted edges) | never written — accepted deviation; the graph is rebuilt on demand from `wiki/*.md` (see §7, G13) |
+| `graph_nodes` / `graph_edges` | Knowledge-graph cache (path, title, type, link_count; weighted edges) | **dropped by migration `015`** (never written — the graph is rebuilt on demand from `wiki/*.md`; see §7, G13 closing note) |
 | `vec_chunks` | Embedding chunks — sqlite-vec **vec0 virtual table** (`chunk_id` PK, `project_id`/`page_id`/`chunk_index`/`chunk_text`/`heading_path`, `embedding FLOAT[dim]`, cosine distance) | used when the sqlite-vec extension loads (see note) |
 | `vec_meta` | Current vector-index dimensionality (single row, `id = 1`) | used to drop/recreate `vec_chunks` when the embedding dimension changes |
 | `_migrations` | Applied migration bookkeeping | used |
@@ -139,14 +139,15 @@ Relational **metadata**. Live schema (13 migrations applied):
 > means re-running "Re-index all pages" (or a fresh ingest). Dimension changes
 > (different embedding model) drop and recreate the table via `vec_meta`.
 
-> **Note on `chat_*`:** chat history **is persisted to SQLite** (issue #21).
-> Sessions are created lazily on the first turn of a conversation (keyed by the
-> client's locally generated session UUID) and every completed turn appends its
-> user/assistant messages; the client loads history back over the session
-> endpoints instead of re-sending it. The desktop/web client additionally keeps
-> its own file-based copies (`.llm-wiki/conversations.json`,
-> `.llm-wiki/chats/<id>.json`); in the web build the server DB is the source of
-> truth and the sidebar merges server sessions with any file-only conversations.
+> **Note on `chat_*`:** the web server keeps a SQLite record of every completed
+> turn (issue #21), but model CONTEXT comes from the SHARED cross-client
+> record — the client-held `conversations.json` history round-trip on both
+> builds, hydrating from `.llm-wiki/agent-sessions/<sessionId>.json` (the
+> desktop's `AgentSession` serde shape) only when a caller (e.g. `/api/v1/chat`)
+> sends no explicit history. The shared session files are written by both the
+> desktop and the web server in the identical on-disk format, so a chat started
+> on one client resumes with the same context on the other. SQLite remains the
+> web-only bookkeeping + link source for legacy sessions.
 
 ### 2b. Project files on disk — `<project>/`
 
@@ -393,16 +394,29 @@ sequenceDiagram
 6. **Shell tools** — `shell.exec` is gated behind an active skill + per-command
    approval policy (or `LLM_WIKI_ALLOW_SHELL=1`).
 
-**Persistence:** chat turns **are written to SQLite** (issue #21). A session
-row is ensured on the first turn of a conversation (client-generated session
-UUID, unique-indexed); the user message is persisted at turn start and the
-assistant message (with its references JSON) at turn completion — never per
-streamed delta, so a cancelled or errored turn leaves just the user message.
-A `regenerate: true` re-run drops the session's last user/assistant exchange
-first (`dropLastExchange`), so the re-persisted user message and the fresh
-answer replace the old pair. History for the next turn is loaded from
-`chat_messages` capped at
-`historyLimit` (client setting, default 10; server default 20). The `:id`
+**Persistence:** the web server keeps its own SQLite record (issue #21) —
+the session row is ensured on the first turn of a conversation
+(client-generated session UUID, unique-indexed), the user message is
+persisted at turn start and the assistant message (with its references JSON)
+at turn completion (never per streamed delta, so a cancelled or errored turn
+leaves just the user message). Since the "one backend, one user data" goal,
+MODEL CONTEXT is sourced from the SHARED cross-client record instead,
+mirroring the desktop runtime:
+- an explicit client history (`historyExplicit: true`, the React app's
+  `conversations.json` round-trip on both builds) wins verbatim — continuing
+  a conversation created on the other client keeps its full context;
+- otherwise the last 12 messages hydrate from the shared on-disk session
+  store (`.llm-wiki/agent-sessions/<sessionId>.json`, the desktop's
+  `AgentSession` serde shape — see `agent-sessions.js`), and `chat_messages`
+  is the fallback for legacy web-only sessions, capped at `historyLimit`
+  (client setting, default 10; server default 20);
+- on successful completion the exchange also appends to that shared session
+  file when `persistSession !== false` (the desktop's default true), so
+  `/api/v1/chat` (MCP / external agent skill) and streaming UI turns resume
+  on either client (`agent_get_session` / `agent_list_sessions` read the same
+  files, desktop arg names and shapes).
+A `regenerate: true` re-run drops the last user/assistant exchange from both
+stores first, so the re-persisted pair replaces the old one. The `:id`
 segment accepts either the integer projects-table id or the project UUID; the
 UUID path resolves via the plugin-store registry and materializes the
 projects row (`chat_sessions`' FK target) on demand. A `resume: true`
@@ -431,10 +445,14 @@ message. Session CRUD: list/create/get/rename/delete under
   plugin store and resolved server-side on every search, so the search UI, the
   chat agent, and the v1/v2 endpoints all honor it without client-side wiring.
   Settings → Embeddings exposes the selector.
-- **Chat is persisted (web).** Sessions and messages live in SQLite
-  (`chat_sessions`/`chat_messages`, issue #21); the server owns history in the
-  web build, and the desktop build keeps its client-held history re-send and
-  file persistence untouched.
+- **Chat context is shared cross-client.** Model context follows the desktop
+  contract: explicit client-held history (`conversations.json` round-trip on
+  both builds) wins; history-less callers hydrate from the shared
+  `.llm-wiki/agent-sessions/<sessionId>.json` files (desktop `AgentSession`
+  shape, `agent-sessions.js`); successful turns append there when
+  `persistSession !== false`. SQLite (`chat_sessions`/`chat_messages`,
+  issue #21) remains the web server's own record and the fallback for legacy
+  web-only sessions.
 - **Single-process server.** `index-v2.js` serves the SPA, the v2 REST API, and
   the legacy `/api/invoke/*` bridge in one process — no second service needed.
 - **SSE event taxonomy is emitted end-to-end** (issue #14, charter §4.7). The
@@ -487,8 +505,9 @@ message. Session CRUD: list/create/get/rename/delete under
   out-of-band edits over the legacy `file-sync://` / `project://files-changed`
   frames, and anything a disconnected client missed is covered by the
   reconnect full-refresh; the incremental graph tables
-  (`graph_nodes`/`graph_edges`) stay unwritten, so `edgesChanged` is
-  best-effort and the graph is still rebuilt on demand from `wiki/*.md`; the
+  (`graph_nodes`/`graph_edges`) were dropped by migration `015` (issue #39 —
+  never written), so `edgesChanged` is best-effort and the graph is still
+  rebuilt on demand from `wiki/*.md`; the
   charter-shaped `events/sse.js` SSEManager remains dead code (never
   mounted; removal is churn with no user value); cross-tab chat sync shows
   live tokens but not tool-step UI (`agent-event` only, active tab).
@@ -527,8 +546,10 @@ message. Session CRUD: list/create/get/rename/delete under
   (`ERROR_CODES` — the server's `ErrorCode` is derived from them, no hand-mirror).
   One schema source, two consumers, so server validation and client types cannot
   drift. The OpenAPI document (`/api/v2/openapi.json`) is generated from these
-  same schemas. CI and Docker build `@llm-wiki/api-types` before the server and
-  the web client.
+  same schemas for a **documented subset** of routes (projects CRUD, chat
+  sessions, chunked upload — see G20); unregistered endpoints are indexed in
+  [API_REFERENCE.md](./API_REFERENCE.md). CI and Docker build
+  `@llm-wiki/api-types` before the server and the web client.
 - **Shared state with desktop.** When the server runs on the same host as the
   desktop app, it reads/writes the desktop's plugin store so settings stay in
   sync; disable with `LLM_WIKI_NO_SHARE=1`.
@@ -579,11 +600,37 @@ section is the ledger.
 | **G10** Server-side image extraction is JS (pdfjs-dist + pure-JS PNG) and may differ from the desktop's Rust pdfium on exotic PDF rasters | Portability of the server pipeline over exact parity with desktop | plans/server-ingest.md (PR #28) |
 | **G11** MinerU local backend requires co-location; an unreachable or failing MinerU falls back to the built-in pdfium preprocess | MinerU is an optional enhancement, never a hard dependency | plans/server-ingest.md (PR #28); `ingest/pipeline.js` |
 | **G12** The server file watcher (`commands/fileSync.js`) is not auto-started at `index-v2.js` boot — it runs only when a client requests it (`start_project_file_watcher`, default-enabled in the web build); with no connected client, out-of-band edits rely on the reconnect full-refresh | Smart reconnect (charter §8) already covers it with a full refresh; server-side auto-start is churn without user value | plans/sse-taxonomy.md (PR #29); §5 SSE note |
-| **G13** `graph_nodes`/`graph_edges` stay unwritten; the graph is rebuilt on demand from `wiki/*.md`, and `graph:updated.edgesChanged` is best-effort (`0` when unknown) | The incremental graph index is a separate gap; on-demand rebuild is fast enough at v1 scale | plans/sse-taxonomy.md (PR #29); §2a + §5 SSE note |
+| **G13** `graph_nodes`/`graph_edges` were never written; the graph is rebuilt on demand from `wiki/*.md`, and `graph:updated.edgesChanged` is best-effort (`0` when unknown) | The incremental graph index is a separate gap; on-demand rebuild is fast enough at v1 scale. **Closing note:** the schema-only tables (plus the file-less `reviews` table) were dropped by migration `015` (issue #39) — the file-backed stores are the single source of truth, so the drop removes the split-truth invite with zero data loss | plans/sse-taxonomy.md (PR #29); §2a + §5 SSE note; issue #39 |
 | **G14** The charter-shaped `events/sse.js` SSEManager remains dead code (never mounted) | Removal is churn with no user value; the live transport is the `emit()` bridge | plans/sse-taxonomy.md (PR #29); §5 SSE note |
 | **G15** Cross-tab chat sync shows live tokens only — tool-step UI renders in the active tab (`agent-event`) | Taxonomy fidelity on the wire without building a second tool-step renderer | plans/sse-taxonomy.md (PR #29); §5 SSE note |
 | **G16** The client's `ownedRunIds` tombstones grow unbounded within a long-lived conversation (cleared only on conversation delete / project reset) | Tombstones must survive the done-frame race; the O(n) check is fine at v1 turn counts | plans/sse-taxonomy.md (PR #29) |
 | **G17** `@llm-wiki/api-types` is a built workspace dependency of the plain-JS server — Docker/CI must build it before the server and client | Accepted cost of one schema source with zero drift | issue #14 api-types decision (PR #23); §5 |
+| **G18** The SSE contract evolved from the charter shape — envelope `{type, projectId, payload}` on `/api/v1/events` became `{event, payload}` on `/api/v2/events` | The global-stream + taxonomy design is strictly more capable (`runId` demux); a client written from the charter was never shipped | docs/architecture/PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md NF-3; §5 SSE note |
+| **G19** Worker pool narrowed from the chartered three roles (parsing/embedding/graph-rebuild) to preprocess-only; embedding runs main-thread (network I/O), graph rebuild stays on-demand (G13). Image extraction is dispatched through the registered worker handler | Embedding is network-bound (a worker adds nothing) and the graph index is superseded by G13's closure; scope reduction recorded instead of left silent | PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md NF-4; `workers/tasks.js`; §3 |
+| **G20** "Auto OpenAPI, zero drift" is re-scoped to a **documented subset**: `/api/v2/openapi.json` registers projects CRUD, chat sessions, chunked upload, and errors only; search/ingest/invoke surfaces are not described | Honest claim beats aspirational coverage; API_REFERENCE.md already states the subset. Full typing of the remaining surfaces lands incrementally under the S2 rule below | PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md NF-5; issue #38; §5 |
+| **G21** Two server entries exist where one was chartered: `index-v2.js` (Docker CMD, `/api/v2`) plus the legacy raw-`node:http` `index.js`, sole mount of `/api/v1`. **Retirement decision (owner, 2026-08-26):** the legacy entry is retained ONLY as the bridge while the MCP server and browser clipper migrate directly onto v2 endpoints (no v1 shim); once they land, `index.js` and `/api/v1` are deleted outright | MCP + clipper become ordinary remote v2 clients per the owner's thin-client direction; long-term coexistence rejected | PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md NF-2/NF-7; owner session 2026-08-26 |
+| **G22** Chat streaming shape evolved from the charter sketch (POST returning the stream body) to POST → `{runId, sessionId}` with tokens streamed over the global SSE stream and messages persisted at turn boundaries | More consistent with Decision 13's single global event stream; works identically for every thin client and survives tab switches/reconnects | PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md NF-8; PR #25; §4 |
+
+### Owner direction — 2026-08-26 (thin-client architecture decisions)
+
+Recorded from the owner's review session of
+[PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md](./architecture/PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md):
+
+1. **One backend, many thin clients.** The Node server (`packages/server`,
+   `/api/v2`) is the single backend. The desktop app is just another client
+   connecting to a (possibly remote) server; its Rust backend is retired via
+   migration path — consumers move first (MCP server, browser clipper), then
+   the shell.
+2. **No filesystem exposure.** Clients never touch the server's filesystem
+   directly; all access goes through the API.
+3. **Client pipelines move server-side.** Deep research, dedup, lint, and
+   image captioning currently drive LLM calls from the browser via
+   `/api/proxy`; they become v2 endpoints so any client gets the same
+   capability (sequenced after the MCP/clipper v2 migration).
+4. **SSOT rule (S2):** no surface migrates to v2 without an
+   `@llm-wiki/api-types` schema. Migration PRs must include their Zod
+   schemas, so each migrated surface joins the typed contract instead of
+   growing untyped debt.
 
 ### Structural deviations from the charter layout (issue #14 — ACCEPT, no code churn)
 
