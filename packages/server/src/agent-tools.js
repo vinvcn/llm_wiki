@@ -3,9 +3,11 @@ import fsp from "node:fs/promises"
 import path from "node:path"
 import { searchCommands } from "./commands/search.js"
 import { webSearchCommands } from "./commands/websearch.js"
+import { runAnytxtSearch } from "./anytxt.js"
 import { recordFileVersion } from "./commands/fileHistory.js"
 import { searchGraph } from "./graph.js"
-import { listAvailableSkills, readSkillReference } from "./skills.js"
+import { listAvailableSkills, readActiveSkillFile } from "./skills.js"
+import { readPreprocessedCache } from "./commands/preprocess.js"
 import { isShellCommandAllowedWithoutPrompt, shellApprovalSummary } from "./shell-policy.js"
 
 // Agent tool specs + executors (Node port of the desktop agent's tool set in
@@ -15,6 +17,8 @@ import { isShellCommandAllowedWithoutPrompt, shellApprovalSummary } from "./shel
 
 const fwd = (p) => p.split(path.sep).join("/")
 const clip = (s, n = 4000) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n) + "\n…[truncated]" : s }
+const SHELL_EXEC_TIMEOUT_SECS = 30
+const MAX_SHELL_OUTPUT_CHARS = 20000
 
 function rel(projectPath, p) { return fwd(path.relative(projectPath, p)) }
 
@@ -44,9 +48,10 @@ const SPECS = {
   "wiki.write_page": { description: "Create or overwrite a wiki page. path is project-relative under wiki/.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
   "workspace.write_file": { description: "Write a generated output file under agent-workspace/.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
   "workspace.append_file": { description: "Append text to a generated output file under agent-workspace/.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
-  "shell.exec": { description: "Run a shell command on the server host (gated; requires approval/enablement).", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-  "skills.load": { description: "List available agent skills.", parameters: { type: "object", properties: {} } },
-  "skill.read_file": { description: "Read a skill's instruction file by id/path.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  "shell.exec": { description: "Run a shell command on the server host (gated; requires approval/enablement).", parameters: { type: "object", properties: { command: { type: "string" }, timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 } }, required: ["command"] } },
+  "skills.load": { description: "Load instruction-only project skills from .llm-wiki/skills.", parameters: { type: "object", properties: {} } },
+  "skill.read_file": { description: "Read a text reference file from an active skill directory by relative path.", parameters: { type: "object", properties: { skill: { type: "string", description: "Optional active skill name; required when multiple skills are active." }, path: { type: "string", description: "Relative path inside the active skill directory, such as references/types.md." } }, required: ["path"] } },
+  "user.ask": { description: "Pause and show the user a structured form with single-choice, multi-choice, text, textarea, or confirmation fields when an active skill needs user input.", parameters: { type: "object", properties: { title: { type: "string" }, description: { type: "string" }, fields: { type: "array", items: { type: "object", properties: { id: { type: "string" }, type: { type: "string", enum: ["single", "multi", "text", "textarea", "confirm"] }, label: { type: "string" }, description: { type: "string" }, placeholder: { type: "string" }, options: { type: "array", items: { type: "object", properties: { label: { type: "string" }, value: { type: "string" }, description: { type: "string" }, recommended: { type: "boolean" } } } }, defaultValue: {} }, required: ["label"] } } }, required: ["fields"] } },
   "llm.generate": { description: "Run a one-shot LLM generation with a prompt (no tools).", parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] } },
   "deep_research.run": { description: "Collect broader external/local evidence for deep research turns before synthesis.", parameters: { type: "object", properties: { query: { type: "string" }, sources: { type: "array", items: { enum: ["web", "anytxt", "wiki", "source"] } } }, required: ["query"] } },
 }
@@ -80,27 +85,101 @@ async function wikiReadPage(input, ctx) {
   return { observation: clip(content, 12000) }
 }
 
-async function sourceSearch(input, ctx) {
-  const dir = path.join(ctx.projectPath, "raw", "sources")
-  const files = []
-  walk(dir, files, (e) => /\.(md|txt|text|org|html?|csv|json|xml|rst)$/i.test(e.name))
-  const toks = tokens(input.query)
-  const scored = []
-  for (const f of files) {
-    let content
-    try { content = await fsp.readFile(f, "utf-8") } catch { continue }
-    const lower = content.toLowerCase()
-    const score = toks.reduce((s, t) => s + (lower.includes(t) ? 1 : 0), 0)
-    if (score > 0) {
-      const idx = lower.indexOf(toks[0])
-      const snippet = clip(content.slice(Math.max(0, idx - 40), idx + 160).replace(/\s+/g, " "), 200)
-      scored.push({ score, ref: { title: path.basename(f), path: rel(ctx.projectPath, f), kind: "source", snippet } })
+// Faithful port of tools.rs search_sources: text formats are read directly,
+// binary formats (pdf/doc/docx/pptx/xls/xlsx/odt/ods/odp/epub/mobi) match
+// ONLY through a fresh preprocess cache, hidden paths are skipped, files are
+// capped at MAX_SOURCE_SEARCH_FILES, snippets mirror snippet_around_byte, and
+// top_k clamps to 1..10. The full query is matched first, then the derived
+// query terms (2+ chars, split on whitespace ,，;；:：, stopwords dropped).
+const SOURCE_TEXT_EXTS = new Set(["md", "markdown", "org", "txt", "json", "csv", "tsv", "yaml", "yml", "xml", "html"])
+const SOURCE_BINARY_EXTS = new Set(["pdf", "doc", "docx", "pptx", "xls", "xlsx", "odt", "ods", "odp", "epub", "mobi"])
+const MAX_SOURCE_SEARCH_FILES = 10_000
+const MAX_SOURCE_SNIPPET_CHARS = 500
+const SOURCE_STOPWORDS = new Set(["raw", "source", "sources", "file", "files", "原始资料", "原始文件", "源文件"])
+
+function sourceQueryTerms(query) {
+  return query
+    .split(/[\s,，;；:：]+/)
+    .map((t) => t.trim())
+    .filter((t) => [...t].length >= 2)
+    .filter((t) => !SOURCE_STOPWORDS.has(t))
+}
+
+// tools.rs snippet_around_byte: center the snippet on the first match,
+// 500 chars, "..." ellipses at either end, whitespace collapsed.
+function snippetAroundByte(content, matchCodeUnitIdx) {
+  const charIdx = Math.min([...content].length, [...content.slice(0, Math.max(0, matchCodeUnitIdx))].length)
+  const start = Math.max(0, charIdx - Math.floor(MAX_SOURCE_SNIPPET_CHARS / 2))
+  let snippet = [...content].slice(start, start + MAX_SOURCE_SNIPPET_CHARS).join("")
+  if (start > 0) snippet = "..." + snippet
+  if ([...content].length > start + MAX_SOURCE_SNIPPET_CHARS) snippet = snippet + "..."
+  return snippet.split(/\s+/).join(" ")
+}
+
+/**
+ * search_sources port (tools.rs) exposed for direct harness use and reused by
+ * the agent loop executor: text formats are read directly, binary formats
+ * match ONLY through the fresh preprocess cache (read_cache), hidden paths
+ * are skipped at every level, the whole query is tried before the derived
+ * terms, files are capped at MAX_SOURCE_SEARCH_FILES, top_k clamps to 1..10,
+ * and snippets mirror snippet_around_byte.
+ */
+export async function searchSources(projectPath, query, topK) {
+  const q = String(query ?? "").trim()
+  if (q === "") throw new Error("source.search query is required")
+  const root = path.join(projectPath, "raw", "sources")
+  const lowerQuery = q.toLowerCase()
+  const terms = sourceQueryTerms(lowerQuery)
+
+  const refs = []
+  let seenFiles = 0
+  let stop = false
+  const dirs = [root]
+  const limit = Math.min(Math.max(Math.floor(topK ?? 5), 1), 10)
+  while (dirs.length && !stop) {
+    const dir = dirs.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) { dirs.push(full); continue }
+      seenFiles += 1
+      if (seenFiles > MAX_SOURCE_SEARCH_FILES) { stop = true; break }
+      const ext = path.extname(e.name).slice(1).toLowerCase()
+      let content
+      if (SOURCE_TEXT_EXTS.has(ext)) {
+        try { content = await fsp.readFile(full, "utf-8") } catch { continue }
+      } else if (SOURCE_BINARY_EXTS.has(ext)) {
+        // Binaries match ONLY through a fresh preprocess cache (read_cache).
+        content = await readPreprocessedCache(full)
+        if (content === null) continue
+      } else {
+        continue
+      }
+      const lower = content.toLowerCase()
+      const matched = [lowerQuery, ...terms].find((term) => lower.includes(term))
+      if (matched === undefined) continue
+      refs.push({
+        title: e.name,
+        path: rel(projectPath, full),
+        kind: "source",
+        snippet: snippetAroundByte(content, lower.indexOf(matched)),
+      })
+      if (refs.length >= limit) { stop = true; break }
     }
   }
-  scored.sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, input.top_k ?? ctx.topK ?? 5)
-  return { observation: top.length ? top.map((s) => `- ${s.ref.path}: ${s.ref.snippet}`).join("\n") : "No source documents matched.", references: top.map((s) => s.ref) }
+  return refs
 }
+
+async function sourceSearch(input, ctx) {
+  const refs = await searchSources(ctx.projectPath, input.query, input.topK ?? input.top_k ?? ctx.topK ?? 5)
+  const observation = refs.length
+    ? refs.map((r) => `- ${r.path}: ${r.snippet}`).join("\n")
+    : "No source documents matched."
+  return { observation, references: refs }
+}
+
 
 async function graphSearch(input, ctx) {
   const topK = input.top_k ?? ctx.topK ?? 5
@@ -123,10 +202,19 @@ async function webSearch(input, ctx) {
 }
 
 async function anytxtSearch(input, ctx) {
-  const config = ctx.store.anytxtConfig ?? {}
-  const results = await webSearchCommands.anytxt_search({ query: input.query, config, maxResults: input.max_results ?? 5 })
-  const references = results.map((r) => ({ title: r.title, path: r.url, kind: "anytxt", snippet: r.snippet }))
-  return { observation: results.length ? results.map((r) => `- ${r.title}: ${r.snippet}`).join("\n") : "No AnyTXT results.", references }
+  // Desktop load_agent_runtime_config: the AnyTxtConfig lives at
+  // store.searchApiConfig.anyTxt (shared plugin-store file) — not a top-level
+  // store key. The loop executor / offline retrieval path both pass the raw
+  // parsed store as ctx.store, so an out-of-band desktop edit is picked up on
+  // the next turn with no restart.
+  const config = ctx.store?.searchApiConfig?.anyTxt ?? {}
+  const topK = input.max_results ?? input.top_k ?? ctx.topK ?? 5
+  const refs = await runAnytxtSearch(input.query, config, topK)
+  const references = refs.map((r) => ({ title: r.title, path: r.path, kind: "anytxt", snippet: r.snippet }))
+  const observation = references.length
+    ? references.map((r) => `- ${r.title}: ${r.snippet ?? ""}`).join("\n")
+    : "No AnyTXT results."
+  return { observation, references }
 }
 
 async function writeUnder(projectPath, relPath, content, mode, toolName) {
@@ -176,16 +264,46 @@ async function shellExec(input, ctx) {
   if (!envAllowed && !isShellCommandAllowedWithoutPrompt(command, ctx?.approvedShellCommands, ctx?.projectPath)) {
     return { observation: `approval required: ${command}`, approvalRequired: true, approvalSummary: shellApprovalSummary(command) }
   }
+  // tools.rs run_shell_exec port: /bin/sh -c in <project>/agent-workspace with
+  // a sanitized env, timeoutSeconds clamped 1..30 (default 30), stdout/stderr
+  // bounded to MAX_SHELL_OUTPUT_CHARS per stream; the model observation is
+  // runtime.rs's exact summary (the same string the offline/legacy path uses).
+  let timeoutSeconds = Number(input?.timeoutSeconds ?? input?.timeout_seconds ?? SHELL_EXEC_TIMEOUT_SECS)
+  if (!Number.isFinite(timeoutSeconds)) timeoutSeconds = SHELL_EXEC_TIMEOUT_SECS
+  timeoutSeconds = Math.min(SHELL_EXEC_TIMEOUT_SECS, Math.max(1, Math.floor(timeoutSeconds)))
+  const projectPath = ctx?.projectPath
+  const workspace = projectPath ? path.join(projectPath, "agent-workspace") : undefined
+  if (workspace) fs.mkdirSync(workspace, { recursive: true })
+  const KEEP = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]
+  const env = {}
+  for (const k of KEEP) if (process.env[k] !== undefined) env[k] = process.env[k]
   const { spawn } = await import("node:child_process")
   const out = await new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], { timeout: 30000 })
-    let buf = ""
-    child.stdout?.on("data", (d) => { buf += d.toString() })
-    child.stderr?.on("data", (d) => { buf += d.toString() })
-    child.on("close", (code) => resolve(`exit ${code}\n${buf.slice(0, 8000)}`))
-    child.on("error", (e) => resolve(`failed: ${e.message}`))
+    let child
+    try { child = spawn("sh", ["-c", command], { cwd: workspace, env }) }
+    catch (e) { resolve({ error: `shell.exec failed to start: ${e.message}` }); return }
+    let stdout = "", stderr = "", settled = false, timedOut = false
+    const cap = (buf, chunk) => (buf.length >= MAX_SHELL_OUTPUT_CHARS ? buf : buf + String(chunk).slice(0, MAX_SHELL_OUTPUT_CHARS - buf.length))
+    const timer = setTimeout(() => { timedOut = true; try { child.kill("SIGKILL") } catch { /* already gone */ } }, timeoutSeconds * 1000)
+    timer.unref?.()
+    child.stdout?.on("data", (d) => { stdout = cap(stdout, d) })
+    child.stderr?.on("data", (d) => { stderr = cap(stderr, d) })
+    child.on("error", (e) => {
+      if (settled) return
+      settled = true; clearTimeout(timer)
+      resolve({ error: `shell.exec failed to start: ${e.message}` })
+    })
+    child.on("close", (code) => {
+      if (settled) return
+      settled = true; clearTimeout(timer)
+      resolve({ exitCode: timedOut ? null : code, timedOut, stdout, stderr })
+    })
   })
-  return { observation: clip(out) }
+  if (out.error) throw new Error(out.error)
+  if (out.timedOut) out.stderr = `${out.stderr ? out.stderr + "\n" : ""}Command timed out after ${timeoutSeconds}s`
+  const exitDebug = out.exitCode === null ? "None" : `Some(${out.exitCode})`
+  const observation = `shell.exec \`${command}\` exit=${exitDebug} timedOut=${out.timedOut}\nstdout:\n${out.stdout}\nstderr:\n${out.stderr}`
+  return { observation }
 }
 
 
@@ -196,8 +314,13 @@ async function skillsLoad(_input, ctx) {
   return { observation }
 }
 async function skillReadFile(input, ctx) {
-  const content = readSkillReference(ctx.projectPath, ctx.skills ?? [], input.path)
-  return { observation: clip(content, 32000) }
+  // Faithful port of read_active_skill_file: requires an active skill, resolves
+  // the target strictly inside the skill directory, and returns the desktop's
+  // "read {skill}:{path}\n{content}" summary shape (runtime.rs
+  // record_loop_tool_success) with whitespace collapsed to 4k chars.
+  const result = readActiveSkillFile(ctx.skills ?? [], input)
+  const content = String(result.content ?? "").trim().replace(/\s+/g, " ").slice(0, 4000)
+  return { observation: `read ${result.skill}:${result.path}\n${content}` }
 }
 
 async function llmGenerate(input, ctx) {
@@ -237,12 +360,17 @@ const EXEC = {
 }
 
 /** Decide which tools to expose for a request, mirroring the desktop gating. */
-export function toolsForRequest(request, mode) {
+export function toolsForRequest(request, mode, skillsActive = false) {
   const names = ["wiki.search", "wiki.read_page", "source.search", "graph.search"]
   if (request.tools?.web) names.push("web.search")
   if (request.tools?.anytxt) names.push("anytxt.search")
   if (mode !== "fast") names.push("wiki.write_page", "workspace.write_file", "workspace.append_file", "shell.exec")
-  names.push("skills.load", "skill.read_file", "llm.generate")
+  names.push("skills.load", "skill.read_file")
+  // user.ask mirrors the desktop loop prompt: offered only when a skill is
+  // active for the turn (runtime.rs lists it in the available-tools block
+  // under `if !skills.is_empty()`).
+  if (skillsActive) names.push("user.ask")
+  names.push("llm.generate")
   // NOTE: deep_research.run is deliberately NOT offered to the model. Like
   // the desktop runtime, it is orchestrated by the runtime itself (see
   // agent.js) and the loop executor rejects model-issued calls for it.
