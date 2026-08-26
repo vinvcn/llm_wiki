@@ -398,7 +398,9 @@ describe("import_project_archive error contract (project_maintenance.rs)", () =>
     const dest = path.join(base, "dest")
     await expect(import_project_archive({ archivePath: archive, destination: dest }))
       .resolves.toBe(dest)
-  }, 30000)
+    // 100k-entry zip build + import: ~5s locally, but shared CI runners have
+    // been observed past 30s — keep headroom without disabling the test.
+  }, 120_000)
 })
 
 describe("Rust parity constants (project_maintenance.rs)", () => {
