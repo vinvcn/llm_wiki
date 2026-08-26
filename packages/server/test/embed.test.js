@@ -30,7 +30,11 @@ beforeEach(() => {
   fetchMock = vi.fn(async (_url, opts) => {
     const body = JSON.parse(opts.body)
     const inputs = Array.isArray(body.input) ? body.input : [body.input]
-    return { ok: true, status: 200, json: async () => ({ data: inputs.map(() => ({ embedding: VEC })) }), text: async () => "" }
+    // The faithful embedding layer reads the RESPONSE BODY AS TEXT then
+    // parses it (search.rs reads the whole body for error previews), so the
+    // mock must return the same payload from both json() and text().
+    const payload = { data: inputs.map(() => ({ embedding: VEC })) }
+    return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) }
   })
   vi.stubGlobal("fetch", fetchMock)
 })

@@ -200,6 +200,94 @@ async function pdfImageEntries(buf) {
   return out
 }
 
+// Faithful Node port of extract_pdf_markdown (extract_images.rs), used by the
+// desktop read_file/preprocess_file PDF path: per-page text blocks shaped
+// exactly like the Rust output ("## Page N\n\n<text>\n", blocks joined by
+// "\n\n"). When mediaDir is given (the desktop does this only for files under
+// <project>/raw/sources with extract_images=true), raster images meeting
+// ExtractOptions::default() (min 100×100, max 500 total, skip page-covering
+// images ≥90% of both page axes when the page already has ≥80 non-whitespace
+// text chars) are PNG-encoded into mediaDir as img-<idx>.png with a GLOBAL
+// counter and appended after their page's text as "![](<urlPrefix>/img-N.png)".
+const PDF_MD_MIN_WIDTH = 100
+const PDF_MD_MIN_HEIGHT = 100
+const PDF_MD_MAX_IMAGES = 500
+const PDF_MD_FULL_PAGE_COVERAGE = 0.90
+const PDF_MD_MIN_TEXT_CHARS = 80
+
+export async function extractPdfMarkdown(input, { mediaDir = null, urlPrefix = "" } = {}) {
+  const buf = typeof input === "string" ? await fsp.readFile(input) : Buffer.from(input)
+  const pdfjs = await loadPdfjs()
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(buf), useSystemFonts: true, isEvalSupported: false, verbosity: 0,
+  }).promise
+  const prefix = String(urlPrefix).replace(/\/+$/, "")
+  let out = ""
+  let idx = 0
+  let totalSaved = 0
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p)
+    if (out) out += "\n\n"
+    out += `## Page ${p}\n\n`
+    let pageText = ""
+    try {
+      const tc = await page.getTextContent()
+      pageText = tc.items.map((it) => it.str).join(" ")
+    } catch { /* page text extraction failed: keep the heading, like the desktop */ }
+    out += pageText
+    out += "\n"
+    if (!mediaDir) continue
+    // Desktop: "no point burning pdfium cycles" when there is no destination —
+    // handled by the continue above. Image walk for this page:
+    const view = page.view || [0, 0, 612, 792]
+    const pageW = view[2] - view[0]
+    const pageH = view[3] - view[1]
+    const meaningfulText = pageText.replace(/\s+/g, "").length >= PDF_MD_MIN_TEXT_CHARS
+    let ops = null
+    try { ops = await page.getOperatorList() } catch { ops = null }
+    if (!ops) continue
+    const OPS = pdfjs.OPS
+    const pageImageMd = []
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      if (ops.fnArray[i] !== OPS.paintImageXObject && ops.fnArray[i] !== OPS.paintJpegXObject) continue
+      const img = await objsGet(page, ops.argsArray[i][0])
+      if (!img || !img.width || !img.height || !img.data) continue
+      const w = img.width
+      const h = img.height
+      if (w < PDF_MD_MIN_WIDTH || h < PDF_MD_MIN_HEIGHT) continue
+      // should_skip_full_page_pdf_image: a raster covering most of the page is
+      // skipped only when the page already carries meaningful extractable text.
+      if (meaningfulText && w >= pageW * PDF_MD_FULL_PAGE_COVERAGE && h >= pageH * PDF_MD_FULL_PAGE_COVERAGE) continue
+      let png = null
+      try {
+        const kind = img.kind // 1 gray, 2 rgb, 3 rgba (pdfjs ImageKind)
+        const channels = kind === 1 ? 1 : kind === 3 ? 4 : 3
+        const expected = w * h * channels
+        if (img.data.length < expected) continue
+        const samples = Buffer.from(img.data.buffer
+          ? img.data.buffer.slice(img.data.byteOffset, img.data.byteOffset + expected)
+          : Buffer.from(img.data).slice(0, expected))
+        png = encodePng(w, h, channels, samples)
+      } catch { continue }
+      idx += 1
+      const fileName = `img-${idx}.png`
+      try {
+        await fsp.mkdir(mediaDir, { recursive: true })
+        await fsp.writeFile(path.join(mediaDir, fileName), png)
+      } catch { continue }
+      totalSaved += 1
+      pageImageMd.push(`![](${prefix}/${fileName})`)
+      if (totalSaved >= PDF_MD_MAX_IMAGES) break
+    }
+    if (pageImageMd.length) {
+      out += "\n"
+      for (const md of pageImageMd) out += md + "\n"
+    }
+    if (totalSaved >= PDF_MD_MAX_IMAGES) break
+  }
+  return out
+}
+
 // ── shared build/save ─────────────────────────────────────────────────────
 function buildRecords(entries) {
   const recs = []

@@ -39,6 +39,7 @@ import {
   deleteIngestTask,
   resetInterruptedTasks,
   deferIngestTaskForUsageLimit,
+  heartbeatIngestTask,
 } from "../store/ingest-queue.js"
 import { runIngestPipeline } from "./pipeline.js"
 import { reportIngestProgress, emitIngestComplete, emitIngestError } from "./progress.js"
@@ -52,6 +53,22 @@ export const MAX_ATTEMPTS = 3
 
 /** Sweep period for resuming deferred (not_before) tasks without external events. */
 const SWEEP_INTERVAL_MS = 60_000
+
+/**
+ * Liveness-heartbeat period per claimed row (issue #32). Stage boundaries
+ * can be minutes apart during long LLM calls; the orchestrator touches the
+ * row's heartbeat_at/updated_at on this cadence so pollers and staleness
+ * heuristics can tell a healthy slow run from a hung/crashed one.
+ * Overridable via LLM_WIKI_INGEST_HEARTBEAT_MS (test hook only, clamped to
+ * 100ms .. 60s; the cron line never sets it).
+ */
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
+
+function resolveHeartbeatIntervalMs() {
+  const raw = parseInt(process.env.LLM_WIKI_INGEST_HEARTBEAT_MS ?? "", 10)
+  if (Number.isNaN(raw)) return DEFAULT_HEARTBEAT_INTERVAL_MS
+  return Math.max(100, Math.min(60_000, raw))
+}
 
 /** Default concurrency cap; overridden by LLM_WIKI_INGEST_CONCURRENCY (1..16). */
 const DEFAULT_CONCURRENCY = 2
@@ -129,7 +146,14 @@ export function kickIngestOrchestrator() {
 async function processTask(row) {
   const entry = { controller: new AbortController(), writtenPaths: [] }
   active.set(row.id, entry)
+  // Issue #32: liveness heartbeat for the duration of this claim. Started
+  // inside the try so the finally block is guaranteed to clear it on EVERY
+  // exit path (success, retryable/terminal failure, usage-limit defer,
+  // cancel).
+  let heartbeat = null
   try {
+    heartbeat = setInterval(() => heartbeatIngestTask(row.id), resolveHeartbeatIntervalMs())
+    heartbeat.unref?.()
     // Fresh store snapshot per attempt (agent.js pattern): settings may have
     // changed since the task was enqueued.
     const store = readStore(SHARED_STORE_NAME) ?? {}
@@ -214,6 +238,7 @@ async function processTask(row) {
       emitIngestError(row, { error: message, retryable: true, maxAttempts: MAX_ATTEMPTS })
     }
   } finally {
+    if (heartbeat) clearInterval(heartbeat)
     active.delete(row.id)
     kick() // chain to the next eligible task
   }

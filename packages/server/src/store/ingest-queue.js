@@ -213,6 +213,25 @@ export function touchIngestTask(taskId, progress) {
 }
 
 /**
+ * Liveness heartbeat while a task is processing (issue #32): persists a
+ * dedicated heartbeat_at plus a fresh updated_at so pollers can see a
+ * healthy long-running stage (LLM streaming, big-file parsing) advance
+ * instead of reading as "stuck" until the next stage boundary. The row is
+ * only ticked while it is still 'processing' — completed / failed / deferred
+ * / cancelled rows are never touched, so heartbeat can never resurrect or
+ * mask a terminal state. Returns true when the row was ticked.
+ */
+export function heartbeatIngestTask(taskId) {
+  const db = getDb()
+  const info = db.prepare(`
+    UPDATE ingest_queue
+    SET heartbeat_at = ?, updated_at = ?
+    WHERE id = ? AND status = 'processing'
+  `).run(Date.now(), Date.now(), taskId)
+  return info.changes > 0
+}
+
+/**
  * Find an unfinished (pending/processing) task for the same project + file
  * path — used by enqueue-by-path to dedupe against a live task.
  */

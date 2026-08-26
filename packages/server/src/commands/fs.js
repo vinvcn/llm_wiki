@@ -3,7 +3,20 @@ import fsp from "node:fs/promises"
 import path from "node:path"
 import crypto from "node:crypto"
 import { recordFileVersion, listFileHistory, restoreFileHistory } from "./fileHistory.js"
-import { preprocessFile as preprocessBinary } from "./preprocess.js"
+import { extractPdfMarkdown } from "./extractImages.js"
+import {
+  preprocessFile as preprocessBinary,
+  readPreprocessedCache,
+  extractPdf,
+  extractOfficeTextFile,
+  extractEbookTextFile,
+  orgToMarkdown,
+  OFFICE_EXTS,
+  EBOOK_EXTS,
+  IMAGE_EXTS,
+  MEDIA_EXTS,
+  LEGACY_DOC_EXTS,
+} from "./preprocess.js"
 import { markAppWrite } from "../appwrite.js"
 import { emit } from "../events.js"
 import { EventTypes } from "../events/bus.js"
@@ -89,11 +102,59 @@ function buildTree(dir, depth, maxDepth, includeHidden) {
   return nodes
 }
 
+// Rust read_file PDF branch: extract_pdf_markdown with a media destination
+// only for files under <project>/raw/sources when extractImages is on (the
+// desktop writes the extracted rasters to wiki/media/<stem>/), otherwise
+// per-page markdown without image extraction.
+async function extractPdfText(p, includeImages) {
+  if (includeImages) {
+    const parent = path.dirname(p)
+    const stem = path.basename(p, path.extname(p))
+    const rawDir = path.dirname(parent)
+    const parentIsSources = parent.endsWith("sources")
+    const rawIsRaw = rawDir.endsWith("raw")
+    if (parentIsSources && rawIsRaw && stem) {
+      const projectRoot = path.dirname(rawDir)
+      const mediaDir = path.join(projectRoot, "wiki", "media", stem)
+      const urlPrefix = mediaDir.split(path.sep).join("/")
+      return await extractPdfMarkdown(p, { mediaDir, urlPrefix })
+    }
+  }
+  return await extractPdf(await fsp.readFile(p))
+}
+
 async function readFile({ path: p, extractImages }) {
-  const buf = await fsp.readFile(p)
-  // extractImages only matters for native PDF rendering; in web mode we
-  // return the textual content best-effort.
-  return buf.toString("utf-8")
+  // Rust read_file: the <dir>/.cache/<file>.txt written by preprocess_file is
+  // authoritative when at least as new as the original.
+  const cached = await readPreprocessedCache(p)
+  if (cached !== null) return cached
+  // Uniform missing-file contract (the desktop's other extractors report their
+  // own open-failure string; the text branch normalizes to this message).
+  if (!fs.existsSync(p)) throw new Error(`File does not exist: '${p}'`)
+  const ext = (path.extname(p).slice(1) || "").toLowerCase()
+  const fileName = path.basename(p)
+  if (ext === "pdf") return await extractPdfText(p, extractImages ?? true)
+  if (ext === "org") return orgToMarkdown(await fsp.readFile(p, "utf-8"))
+  if (OFFICE_EXTS.has(ext)) return await extractOfficeTextFile(p, ext)
+  if (EBOOK_EXTS.has(ext)) return await extractEbookTextFile(p, ext)
+  if (IMAGE_EXTS.has(ext)) {
+    const size = await fsp.stat(p).then((st) => st.size).catch(() => 0)
+    return `[Image: ${fileName} (${(size / 1024).toFixed(1)} KB)]`
+  }
+  if (MEDIA_EXTS.has(ext)) {
+    const size = await fsp.stat(p).then((st) => st.size).catch(() => 0)
+    return `[Media: ${fileName} (${(size / 1048576).toFixed(1)} MB)]`
+  }
+  if (LEGACY_DOC_EXTS.has(ext)) {
+    return `[Document: ${fileName} — text extraction not supported for .${ext} format]`
+  }
+  try {
+    return await fsp.readFile(p, "utf-8")
+  } catch (e) {
+    const exists = fs.existsSync(p)
+    if (!exists) throw new Error(`File does not exist: '${p}'`)
+    throw new Error(`Failed to read file '${p}' as text: ${e.message} (likely binary, locked, or non-UTF-8)`)
+  }
 }
 
 async function writeFile({ path: p, contents, suppressFileEvents = false }) {
@@ -155,41 +216,138 @@ async function listDirectory({ path: p, includeHidden, maxDepth }) {
   return buildTree(p, 0, md, inc)
 }
 
+// 1:1 ports of src-tauri/src/commands/fs.rs copy_file / copy_directory /
+// delete_file (incl. file_sync::mark_app_write_path semantics): the server's
+// own copies/deletes stay invisible to the filesystem watchers — a copy into
+// raw/sources must NOT be re-enqueued into the shared file-change-queue.json
+// (the desktop suppresses it via mark_app_write_path; the web now does too).
+
 async function copyFile({ source, destination, suppressFileEvents = false }) {
-  await fsp.mkdir(path.dirname(destination), { recursive: true })
-  await fsp.copyFile(source, destination)
+  const parent = path.dirname(destination)
+  try {
+    await fsp.mkdir(parent, { recursive: true })
+  } catch (err) {
+    throw new Error(`Failed to create parent dirs: ${err.message}`)
+  }
+  markAppWrite(destination)
+  try {
+    await fsp.copyFile(source, destination)
+  } catch (err) {
+    throw new Error(`Failed to copy '${source}' to '${destination}': ${err.message}`)
+  }
+  markAppWrite(destination)
   if (!suppressFileEvents) {
     emitFileEvent(EventTypes.FILE_CREATED, destination)
   }
 }
 
 async function copyDirectory({ source, destination, suppressFileEvents = false }) {
+  // 1:1 port of Rust copy_directory (fs.rs): the destination root is marked
+  // as an app write BEFORE validating/copying, entries whose name starts
+  // with "." are skipped (files AND dirs), the non-directory source guard and
+  // error strings match Rust, and the returned list contains the copied FILES
+  // only (destination paths, forward slashes) — directories are created but
+  // not listed, exactly like the desktop's Vec<String> return.
+  markAppWrite(destination)
+  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+    throw new Error(`'${source}' is not a directory`)
+  }
+  const copiedFiles = []
   const created = []
-  await fsp.mkdir(destination, { recursive: true })
-  created.push(fwd(destination))
   const walk = async (src, dest) => {
-    const entries = await fsp.readdir(src, { withFileTypes: true })
+    try {
+      await fsp.mkdir(dest, { recursive: true })
+    } catch (err) {
+      throw new Error(`Failed to create dir '${dest}': ${err.message}`)
+    }
+    created.push(fwd(dest))
+    let entries
+    try {
+      entries = await fsp.readdir(src, { withFileTypes: true })
+    } catch (err) {
+      throw new Error(`Dir entry error: ${err.message}`)
+    }
     for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue
       const s = path.join(src, entry.name)
       const d = path.join(dest, entry.name)
       if (entry.isDirectory()) {
-        await fsp.mkdir(d, { recursive: true })
-        created.push(fwd(d))
         await walk(s, d)
       } else {
-        await fsp.copyFile(s, d)
+        try {
+          await fsp.copyFile(s, d)
+        } catch (err) {
+          throw new Error(`Failed to copy '${s}': ${err.message}`)
+        }
+        markAppWrite(d)
+        copiedFiles.push(fwd(d))
         created.push(fwd(d))
       }
     }
   }
   await walk(source, destination)
   if (!suppressFileEvents) {
-    // file:created per created path — the same list the command returns.
+    // file:created per created path (dirs + files) — richer than the Rust
+    // return list, which only feeds command results, not the SSE tree.
     for (const createdPath of created) {
       emitFileEvent(EventTypes.FILE_CREATED, createdPath)
     }
   }
-  return created
+  return copiedFiles
+}
+
+// Desktop remove_path_with_retry (fs.rs): up to 4 attempts, backing off
+// 250/500/1000 ms on Windows transient delete errors (antivirus/indexer
+// locks), so a one-shot delete does not fail on a momentary lock.
+function isWindowsTransientDeleteError(err) {
+  if (process.platform !== "win32") return false
+  const code = err && err.code
+  return code === "EBUSY" || code === "EPERM" || code === "EACCES"
+}
+
+async function removePathWithRetry(target, isDir) {
+  let lastErr = null
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      // No force: a missing path must throw (Rust fs::remove_file errors),
+      // so delete_file reports the desktop's hard failure instead of a
+      // silent no-op.
+      if (isDir) await fsp.rm(target, { recursive: true })
+      else await fsp.rm(target)
+      return
+    } catch (err) {
+      lastErr = err
+      if (attempt < 3 && isWindowsTransientDeleteError(err)) {
+        await new Promise((r) => setTimeout(r, 250 * (1 << attempt)))
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastErr ?? new Error("delete failed")
+}
+
+async function deleteFile({ path: p, suppressFileEvents = false }) {
+  // 1:1 port of Rust delete_file (fs.rs): mark app-write BEFORE and AFTER
+  // (the watchers must not treat the app's own delete as an external edit),
+  // directories remove recursively like remove_dir_all, and a missing path
+  // is a hard error (`Failed to delete file '<path>': <cause>`), NOT a
+  // silent no-op — the desktop frontend already tolerates that error.
+  markAppWrite(p)
+  const isDir = fs.existsSync(p) && fs.statSync(p).isDirectory()
+  try {
+    await removePathWithRetry(p, isDir)
+  } catch (err) {
+    throw new Error(
+      isDir
+        ? `Failed to delete directory '${p}': ${err.message}`
+        : `Failed to delete file '${p}': ${err.message}`,
+    )
+  }
+  markAppWrite(p)
+  if (!suppressFileEvents) {
+    emitFileEvent(EventTypes.FILE_DELETED, p)
+  }
 }
 
 async function preprocessFile(args) {
@@ -197,17 +355,6 @@ async function preprocessFile(args) {
   // preprocess.js so the browser ingest pipeline gets the same text the
   // desktop app produces from binary documents.
   return preprocessBinary(args)
-}
-
-async function deleteFile({ path: p, suppressFileEvents = false }) {
-  const stat = await fsp.lstat(p).catch(() => null)
-  if (!stat) return
-  if (stat.isDirectory()) await fsp.rm(p, { recursive: true, force: true })
-  else await fsp.rm(p, { force: true })
-  if (!suppressFileEvents) {
-    // Only on an ACTUAL removal: a missing path no-ops above and emits nothing.
-    emitFileEvent(EventTypes.FILE_DELETED, p)
-  }
 }
 
 async function createDirectory({ path: p }) {

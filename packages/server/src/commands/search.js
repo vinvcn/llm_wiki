@@ -5,6 +5,7 @@ import { vectorCommands, vectorIndexHealth } from "./vectorstore.js"
 import { isVecAvailable } from "../store/db.js"
 import { readStoreKey } from "../store.js"
 import { SHARED_STORE_NAME } from "../config.js"
+import { fetchEmbeddingWithRetry, fetchEmbeddingBatch as fetchEmbeddingBatchOnce } from "../embedding-fetch.js"
 
 // Node port of the keyword-search + page-links subset of
 // src-tauri/src/commands/search.rs, plus server-side embedding fetches.
@@ -169,9 +170,17 @@ function searchMode(tokenRankEmpty, vectorHits, graphHits) {
 
 async function resolveQueryEmbedding(query, queryEmbedding, embeddingConfig) {
   if (Array.isArray(queryEmbedding) && queryEmbedding.length) return queryEmbedding
-  if (!embeddingConfig || !embeddingConfig.enabled || !embeddingConfig.endpoint) return null
+  // Desktop resolve_query_embedding: disabled config, an empty endpoint or an
+  // empty model means NO embedding call at all (keyword-only degradation).
+  if (
+    !embeddingConfig || !embeddingConfig.enabled
+    || !String(embeddingConfig.endpoint ?? "").trim()
+    || !String(embeddingConfig.model ?? "").trim()
+  ) return null
   try {
-    const vec = await embeddingFetch({ text: query, cfg: embeddingConfig })
+    // One attempt only (max_retries=0) like search.rs's fetch_embedding_with_retry
+    // call for queries — a provider outage degrades to keyword, never loops.
+    const vec = await embeddingFetch({ text: query, cfg: embeddingConfig, maxRetries: 0 })
     return Array.isArray(vec) && vec.length ? vec : null
   } catch {
     return null
@@ -247,7 +256,17 @@ export function resolveWikiSearchMode(requested) {
   return "hybrid"
 }
 
+const MAX_RESULTS = 50 // search.rs MAX_RESULTS — top_k is clamped, never honored raw
+
 async function searchProject({ projectPath, query, topK = 20, includeContent = false, queryEmbedding = null, embeddingConfig = null, wikiSearchMode = null }) {
+  // search_project_inner input contract (desktop parity, exact messages).
+  if (!query || !String(query).trim()) throw new Error("query is required")
+  if (Array.isArray(queryEmbedding)) {
+    if (queryEmbedding.length === 0) throw new Error("queryEmbedding must not be empty")
+    if (!queryEmbedding.every((v) => typeof v === "number" && Number.isFinite(v))) {
+      throw new Error("queryEmbedding must contain only finite numbers")
+    }
+  }
   const retrievalMode = resolveWikiSearchMode(wikiSearchMode)
   const wikiRoot = path.join(projectPath, "wiki")
   const files = []
@@ -302,8 +321,9 @@ async function searchProject({ projectPath, query, topK = 20, includeContent = f
 
   // The vector leg runs BEFORE keyword scoring so a mid-retrieval failure can
   // still degrade a vector-mode search to keyword results.
-  // LIMIT binds must be integers: floor topK so fractional values don't throw.
-  const limit = Math.max(1, Math.floor(Number(topK) || 20))
+  // LIMIT binds must be integers: floor topK so fractional values don't throw,
+  // and clamp to search.rs's MAX_RESULTS=50 like the desktop.
+  const limit = Math.max(1, Math.min(MAX_RESULTS, Math.floor(Number(topK) || 20)))
   let vectorHits = 0
   let vectorResults = []
   if (useVector) {
@@ -422,48 +442,24 @@ async function getPageLinks({ projectPath, filePath }) {
   return { outgoing: dedupByPath(outgoing), backlinks: dedupByPath(backlinks), missing: dedupByTitle(missing) }
 }
 
-// ── Server-side embeddings (OpenAI-compatible /embeddings) ────────────────
-function embeddingUrl(endpoint) {
-  const base = (endpoint || "").replace(/\/+$/, "")
-  return /\/embeddings$/.test(base) ? base : `${base}/embeddings`
-}
-
-function embeddingHeaders(cfg) {
-  const headers = { "Content-Type": "application/json" }
-  if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`
-  const reserved = new Set(["authorization","content-type","host","content-length","x-goog-api-key"])
-  for (const [k, v] of Object.entries(cfg.extraHeaders || {})) {
-    if (!reserved.has(k.toLowerCase())) headers[k] = v
-  }
-  return headers
-}
-
-async function callEmbedding(cfg, input) {
-  if (!cfg || !cfg.endpoint) throw new Error("Embedding endpoint not configured")
-  const body = { model: cfg.model, input }
-  if (cfg.outputDimensionality) body.dimensions = Math.round(cfg.outputDimensionality)
-  const res = await fetch(embeddingUrl(cfg.endpoint), {
-    method: "POST",
-    headers: embeddingHeaders(cfg),
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`Embedding request failed: ${res.status} ${await res.text().catch(() => "")}`)
-  const json = await res.json()
-  return json.data.map((d) => d.embedding)
-}
+// ── Server-side embeddings ─────────────────────────────────────────────────
+// Faithful port of search.rs's embedding layer (embedding-fetch.js): provider
+// special cases (Google Gemini :embedContent, Doubao multimodal, Volcengine
+// endpoint shaping), the local/private Origin header, reserved/unsafe extra
+// header skipping, the oversize auto-halving retry, and byte-identical error
+// strings. All outbound requests use global fetch, which the proxy-env
+// dispatcher routes through the configured forward proxy.
 
 export async function embeddingFetch({ text, cfg, maxRetries = 3 }) {
-  let lastErr
-  for (let attempt = 0; attempt < Math.max(1, maxRetries); attempt++) {
-    try { const [vec] = await callEmbedding(cfg, text); return vec }
-    catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 250 * (attempt + 1))) }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+  if (!cfg || !cfg.endpoint) throw new Error("Embedding endpoint not configured")
+  return await fetchEmbeddingWithRetry(text, cfg, Math.max(0, Number(maxRetries) || 0))
 }
 
 export async function embeddingFetchBatch({ texts, cfg }) {
-  if (!texts || texts.length === 0) return []
-  return await callEmbedding(cfg, texts)
+  if (!cfg || !cfg.endpoint) throw new Error("Embedding endpoint not configured")
+  // Empty/oversized batches error with the desktop's exact message (the
+  // ingest layer guards empty inputs itself before calling).
+  return await fetchEmbeddingBatchOnce(texts, cfg)
 }
 
 export const searchCommands = {

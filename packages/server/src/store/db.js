@@ -259,4 +259,30 @@ const MIGRATIONS = [
     db.exec(`ALTER TABLE ingest_queue ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`)
     db.exec(`ALTER TABLE ingest_queue ADD COLUMN folder_context TEXT NOT NULL DEFAULT ''`)
   }],
+
+  ["014_ingest_heartbeat", (db) => {
+    // Issue #32: liveness heartbeat. A stage boundary can be minutes apart
+    // (long LLM calls), which left progress/updated_at frozen for the whole
+    // call — a healthy run was indistinguishable from a hung one. The
+    // orchestrator now writes heartbeat_at (plus a fresh updated_at) every
+    // ~15s while a task is processing, so pollers and any future
+    // staleness-based recovery can reason about liveness independently of
+    // stage transitions.
+    db.exec(`ALTER TABLE ingest_queue ADD COLUMN heartbeat_at INTEGER`)
+  }],
+
+  ["015_drop_vestigial_tables", (db) => {
+    // Issue #39: the server never wrote `graph_nodes` / `graph_edges` (the
+    // graph is rebuilt on demand from wiki/*.md — see PUSH1 G13) and never
+    // wrote the `reviews` table (reviews live in .llm-wiki/review.json).
+    // All three were schema-only: no code referenced them outside their
+    // CREATE statements and every observed database held 0 rows. Keeping
+    // schema for stores whose truth lives elsewhere invites split-truth
+    // writes, so drop them. `graph_edges` references `graph_nodes` (FK), so
+    // it must go first; DROP TABLE IF EXISTS keeps this idempotent for
+    // databases that already lost the tables some other way.
+    db.exec(`DROP TABLE IF EXISTS graph_edges`)
+    db.exec(`DROP TABLE IF EXISTS graph_nodes`)
+    db.exec(`DROP TABLE IF EXISTS reviews`)
+  }],
 ]
