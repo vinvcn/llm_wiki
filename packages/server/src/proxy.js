@@ -6,6 +6,27 @@ import { Readable } from "node:stream"
 // the web client routes cross-origin requests (LLM chat/ingest, etc.) through
 // this endpoint. The upstream response is streamed back verbatim so SSE-style
 // LLM streaming works end-to-end.
+//
+// Outbound routing: the global undici dispatcher installed by proxy-env.js
+// (`setGlobalDispatcher`) funnels every plain `fetch()` through the user's
+// configured forward proxy (verify-proxy-env pins that contract), so this
+// module uses the global fetch like every other server outbound call site.
+//
+// Request body envelope (the JSON spec POSTed by the web shim, src/web/http.ts):
+//   { url, method, headers, body }         — text body (JSON payloads, etc.)
+//   { url, method, headers, bodyBase64 }   — BINARY body, byte-exact. The
+//     desktop plugin hands raw bytes to reqwest; the browser shim base64-
+//     encodes them (ArrayBuffer/TypedArray/Blob bodies) so e.g. the MinerU
+//     PDF upload arrives uncorrupted. Optional `bodyContentType` sets the
+//     Content-Type the browser would have derived from a Blob's type.
+//   { url, method, headers, formEntries }  — multipart/form-data upload.
+//     Entries are {name, value} text fields or {name, fileName, contentType,
+//     base64} file parts; the server rebuilds a native FormData and lets the
+//     HTTP stack generate the multipart encoding + boundary (the boundary the
+//     browser generated is meaningless here, so any caller-sent Content-Type
+//     is dropped for formEntries). This is the desktop's exact behavior for
+//     the local MinerU backend's FormData submit.
+// Exactly one of body / bodyBase64 / formEntries may be present.
 
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "transfer-encoding", "content-encoding",
@@ -13,28 +34,77 @@ const HOP_BY_HOP = new Set([
   "proxy-authorization",
 ])
 
+function badRequest(res, message) {
+  res.writeHead(400, { "Content-Type": "application/json" })
+  res.end(JSON.stringify({ error: message }))
+}
+
+async function readRawBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
+}
+
+function rebuildFormData(entries) {
+  const form = new FormData()
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || typeof entry.name !== "string" || entry.name === "") {
+      throw new Error("Invalid formEntries entry")
+    }
+    if ("base64" in entry) {
+      if (typeof entry.base64 !== "string") throw new Error("Invalid formEntries file part")
+      const bytes = Buffer.from(entry.base64, "base64")
+      const type = typeof entry.contentType === "string" && entry.contentType ? entry.contentType : "application/octet-stream"
+      const fileName = typeof entry.fileName === "string" && entry.fileName ? entry.fileName : entry.name
+      form.append(entry.name, new Blob([bytes], { type }), fileName)
+    } else if ("value" in entry) {
+      form.append(entry.name, String(entry.value))
+    } else {
+      throw new Error("Invalid formEntries entry")
+    }
+  }
+  return form
+}
+
 export async function handleProxy(req, res) {
-  let raw = ""
-  for await (const chunk of req) raw += chunk
   let spec
-  try { spec = JSON.parse(raw || "{}") } catch {
-    res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"Invalid JSON"}'); return
+  try { spec = JSON.parse((await readRawBody(req)).toString("utf-8") || "{}") } catch {
+    badRequest(res, "Invalid JSON"); return
   }
-  const { url, method = "GET", headers = {}, body = null } = spec
-  if (!url || typeof url !== "string") {
-    res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"Missing url"}'); return
-  }
+  const { url, method = "GET", headers = {}, body = null, bodyBase64 = null, bodyContentType = null, formEntries = null } = spec
+  if (!url || typeof url !== "string") { badRequest(res, "Missing url"); return }
   let parsed
-  try { parsed = new URL(url) } catch {
-    res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"Invalid url"}'); return
-  }
+  try { parsed = new URL(url) } catch { badRequest(res, "Invalid url"); return }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"Only http(s) URLs may be proxied"}'); return
+    badRequest(res, "Only http(s) URLs may be proxied"); return
   }
+
+  const bodyKinds = (body != null ? 1 : 0) + (bodyBase64 != null ? 1 : 0) + (formEntries != null ? 1 : 0)
+  if (bodyKinds > 1) { badRequest(res, "Ambiguous body: send exactly one of body, bodyBase64, formEntries"); return }
 
   const fwdHeaders = {}
   for (const [k, v] of Object.entries(headers || {})) {
     if (!HOP_BY_HOP.has(k.toLowerCase())) fwdHeaders[k] = v
+  }
+
+  let upstreamBody
+  if (formEntries != null) {
+    if (!Array.isArray(formEntries)) { badRequest(res, "formEntries must be an array"); return }
+    try { upstreamBody = rebuildFormData(formEntries) } catch (err) { badRequest(res, err.message); return }
+    // The multipart boundary is generated by THIS stack's serialization; the
+    // caller's browser-generated Content-Type would mismatch and corrupt it.
+    for (const k of Object.keys(fwdHeaders)) {
+      if (k.toLowerCase() === "content-type") delete fwdHeaders[k]
+    }
+  } else if (bodyBase64 != null) {
+    if (typeof bodyBase64 !== "string") { badRequest(res, "bodyBase64 must be a string"); return }
+    upstreamBody = Buffer.from(bodyBase64, "base64")
+    if (typeof bodyContentType === "string" && bodyContentType) {
+      const hasContentType = Object.keys(fwdHeaders).some((k) => k.toLowerCase() === "content-type")
+      if (!hasContentType) fwdHeaders["Content-Type"] = bodyContentType
+    }
+  } else if (body != null) {
+    upstreamBody = body
   }
 
   let upstream
@@ -42,7 +112,7 @@ export async function handleProxy(req, res) {
     upstream = await fetch(url, {
       method,
       headers: fwdHeaders,
-      body: method === "GET" || method === "HEAD" ? undefined : (body ?? undefined),
+      body: method === "GET" || method === "HEAD" ? undefined : upstreamBody,
       redirect: "follow",
     })
   } catch (err) {
