@@ -61,3 +61,9 @@ instruction. Indexed by [OWNER_ACCEPTANCE.md](OWNER_ACCEPTANCE.md).*
 
 **Commits:**
 - tested: [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) · produced this session: [`288657f`](https://github.com/vinvcn/llm_wiki/commit/288657fc3f001a343bac3b3fdbce9d5dbf396048) (#34) · fixes: none (issue #32 open).
+
+---
+
+## Correction note (2026-08-13, unattended run)
+
+**Problem 1 (ingest heartbeat gap, [#32](https://github.com/vinvcn/llm_wiki/issues/32)) is fixed.** Dated note per the index rules; the merged record above is otherwise untouched. The web server's ingest orchestrator now runs a 15 s per-claim liveness heartbeat while a task is `processing`: `packages/server/src/store/db.js` migration `014_ingest_heartbeat`, `heartbeatIngestTask()` in `packages/server/src/store/ingest-queue.js` (writes `heartbeat_at` + a fresh `updated_at`, no-op once the row leaves `processing`), and a per-claim interval in `packages/server/src/ingest/orchestrator.js` cleared on every exit path (success, retry, usage-limit defer, cancel). The field is exposed through `GET /api/v2/projects/:id/ingest/queue[/:taskId]` and the `IngestTaskSchema` SSOT. Verified by committed tests: heartbeat store semantics (6 assertions), an orchestrator liveness test (heartbeat advances over a held-open pipeline mock and stops after completion, 100 ms test cadence), and an API-exposure test; full server suite + all `/tmp/gates.sh` gates green. Re-running this session's repro (poll the row every 5 s during a slow provider ingest) now shows `updated_at` advancing every ~15 s during the `generation` leg.

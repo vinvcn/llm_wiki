@@ -134,7 +134,7 @@ Project-scoped routes are mounted under `/api/v2/projects/:id/...`.
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/v2/projects/:id/search` | Hybrid search. Body `{ "query", "topK"? (1–100, default 20), "includeContent"? }` → `{ results: [{ path, score, snippet?, content? }], mode, tokenHits, vectorHits, graphHits, vectorUnavailableReason? }` — `vectorUnavailableReason` is present when the vector leg degraded and the search fell back (see PUSH1 §4). |
+| POST | `/api/v2/projects/:id/search` | Hybrid search. Body `{ "query", "topK"? (1–100, default 20), "includeContent"? }` → `{ results: [{ path, title, score, titleMatch, images: [{ url, alt }], snippet?, content?, vectorScore? }], mode, tokenHits, vectorHits, graphHits, vectorUnavailableReason? }` — `title`/`titleMatch`/`images` are always present; `snippet` is always present at runtime (optional in the schema for tolerance); `vectorScore` appears on vector-ranked rows when the vector leg ran; `content` only with `includeContent`; `vectorUnavailableReason` is present when the vector leg degraded and the search fell back (see PUSH1 §4). |
 
 ### Graph
 
@@ -146,13 +146,13 @@ Project-scoped routes are mounted under `/api/v2/projects/:id/...`.
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/v2/projects/:id/chat` | Start a chat turn. Body `{ "message", "sessionId"?, "mode"?, "tools"?, "topK"?, "includeContent"?, "skills"?, "resume"?, "regenerate"?, "historyLimit"? }` → immediate `{ runId, sessionId }` (the response is NOT streamed — the answer arrives over SSE `agent-event` + `chat:*` frames; `sessionId` is echoed, server-generated when omitted). `regenerate: true` drops the session's last user/assistant exchange before re-running. |
+| POST | `/api/v2/projects/:id/chat` | Start a chat turn. Body `{ "message", "sessionId"?, "mode"?, "tools"?, "topK"?, "includeContent"?, "skills"?, "history"?, "historyExplicit"?, "resume"?, "regenerate"?, "historyLimit"? }` → immediate `{ runId, sessionId }` (the response is NOT streamed — the answer arrives over SSE `agent-event` + `chat:*` frames; `sessionId` is echoed, server-generated when omitted as `ui_<uuid>`). `history` / `historyExplicit` carry the client-held conversations.json round-trip and win verbatim (the desktop contract, both builds); when omitted (or empty + not explicit) the server hydrates the last 12 messages from the shared `.llm-wiki/agent-sessions/<sessionId>.json` files (desktop `AgentSession` shape). `regenerate: true` drops the session's last user/assistant exchange before re-running. |
 | POST | `/api/v2/projects/:id/chat/writes` | Chat "Write to Wiki" — generates and writes wiki pages from the conversation. Body `{ "sessionId", "userGuidance"?, "sourcePath"?, "runId"? }` (`runId`: optional client-generated run id so the owning tab can tombstone it before the response lands; server generates one when absent) → `{ runId, sessionId, writePrompt }`; streams `agent-event` frames (`messageDelta` / `wikiWrites` / `error` / `done`). |
 | POST | `/api/v2/projects/:id/chat/:runId/cancel` | Cancel a running turn. |
 | GET | `/api/v2/projects/:id/chat/sessions` | List sessions → `{ sessions }`, most recent first. |
 | POST | `/api/v2/projects/:id/chat/sessions` | Create an empty session. Body `{ "title"? }` → `201 { session }`. |
 | GET | `/api/v2/projects/:id/chat/sessions/:sessionId` | Get session state/history → `{ session, messages }`. |
-| PATCH | `/api/v2/projects/:id/chat/sessions/:sessionId` | Rename a session. Body `{ "title" }` → `{ session }`. |
+| PATCH | `/api/v2/projects/:id/chat/sessions/:sessionId` | Rename a session — **rename-or-create**: a missing session is created for this project first (the web client syncs a locally-created conversation's auto-title before the first turn lazily creates the row). Body `{ "title" }` → `{ session }`; cross-project ids still 404. |
 | DELETE | `/api/v2/projects/:id/chat/sessions/:sessionId` | Delete a session → `204 No Content` (its messages cascade). |
 
 ### Ingest (`/api/v2/projects/:id/ingest`)
@@ -166,6 +166,15 @@ Project-scoped routes are mounted under `/api/v2/projects/:id/...`.
 | GET | `/ingest/queue/:taskId` | Get one queued task. |
 | POST | `/ingest/queue/:taskId/retry` | Re-arm a `failed` task (409 otherwise). |
 | DELETE | `/ingest/queue/:taskId` | Cancel a task (aborts the run, cleans up written files + embeddings) or remove a queued one. |
+
+> Queue rows returned by `GET /ingest/queue` and `GET /ingest/queue/:taskId`
+> carry the raw `ingest_queue` row: the lifecycle fields (`attempt_count`,
+> `started_at`, `updated_at`, `not_before`, `folder_context`) plus
+> `heartbeat_at` — the orchestrator touches the latter (and `updated_at`) every
+> ~15 s while a task is `processing` (issue #32), so pollers can distinguish a
+> healthy slow run (long LLM call) from a hung/crashed one. `heartbeat_at` is
+> null until the task is claimed and never updated after the row leaves
+> `processing`.
 
 ### Reviews
 
@@ -182,6 +191,15 @@ Project-scoped routes are mounted under `/api/v2/projects/:id/...`.
 | POST | `/maintenance/import` | Import an archive. Body `{ "archivePath", "destination" }`. |
 | GET | `/maintenance/file-history` | File edit history. Query: `path`. |
 | POST | `/maintenance/file-history/restore` | Restore a historical version. Body `{ "path", "entryId" }`. |
+
+> **Export/import error contract:** command failures return `400 VALIDATION_ERROR`
+> with the exact desktop (`project_maintenance.rs`) message — e.g.
+> `Export destination must be outside the project directory`, `Import destination
+> must be empty`, `Archive is not an LLM Wiki project (wiki/index.md is missing)`,
+> `Project archive contains too many entries` (100 000-entry cap), `Unsafe archive
+> path: …`, `Archive contains an unsupported symbolic link: …`. Import validates
+> the raw zip central directory (entry count, paths, symlink modes, expanded size)
+> before any extraction.
 
 ### Settings
 
@@ -236,7 +254,12 @@ The stream additionally carries the pre-taxonomy **legacy watcher frames**
 `project://files-changed`, emitted by the server-side file watcher
 (`commands/fileSync.js`, started on demand by the client — default-enabled in
 the web build). The web client maps `project://files-changed` and
-`file-sync://changed` onto the `file:modified` handling path.
+`file-sync://changed` onto the `file:modified` handling path. On
+`project://files-changed`, `.llm-wiki/` paths are otherwise filtered out EXCEPT
+the allowlisted state file `.llm-wiki/review.json`, so a review item added or
+resolved externally (e.g. by the desktop app) reaches the open web Review view
+live (issue #13 item 3); the server's own writes to it are suppressed via
+app-write-ignore.
 
 Notes: `path` is project-relative when the emitting site knows the project
 and absolute otherwise (legacy invoke writers resolve their project by
@@ -265,7 +288,7 @@ additionally serves the endpoints the current web client depends on:
 | POST | `/api/invoke/:command` | Command dispatch (JSON args body). |
 | GET/PUT/DELETE | `/api/store/:name[/:key]` | Read/write/delete plugin-store JSON. |
 | POST | `/api/proxy` | Outbound HTTP proxy for provider calls. |
-| * | `/api/v1/*` | Legacy v1 REST surface. |
+| * | `/api/v1/*` | Desktop-API surface for the bundled MCP server / external agent skill. Enforces `api_server.rs` semantics: `/api/v1/health` is public even when the API is disabled; `apiConfig.enabled=false` (shared store) 503s every other endpoint with `API server is disabled in Settings → API Server` before auth; agent chat (`POST /projects/:id/chat` + `/chat/:sid/cancel`) always requires a real token (`Bearer` / `?token=` / `x-llm-wiki-token`) even in unauthenticated mode; only GET/POST/PATCH are accepted (405 otherwise). |
 
 ---
 
