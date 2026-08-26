@@ -627,10 +627,12 @@ Recorded from the owner's review session of
    image captioning currently drive LLM calls from the browser via
    `/api/proxy`; they become v2 endpoints so any client gets the same
    capability (sequenced after the MCP/clipper v2 migration).
-4. **SSOT rule (S2):** no surface migrates to v2 without an
-   `@llm-wiki/api-types` schema. Migration PRs must include their Zod
-   schemas, so each migrated surface joins the typed contract instead of
-   growing untyped debt.
+ 4. **SSOT rule (S2):** no surface migrates to v2 without an
+    `@llm-wiki/api-types` schema. Migration PRs must include their Zod
+    schemas, so each migrated surface joins the typed contract instead of
+    growing untyped debt.
+
+| **G23** Desktop-capability parity port: the server absorbs desktop-only features the charter never promised it — outbound proxy plumbing (`proxy-env.js`), clip-server listener (`clip-server.js`), AnyTXT search (`anytxt.js`), websearch, on-disk agent sessions, embedding fetch layer, raw file streaming, user-input bridge — plus `scripts/verify/` surface-parity checks | Not a charter deviation but an unledgered scope extension; recorded per owner thin-client direction (S1): for the desktop to become just another client, everything its Rust backend does must exist on the Node side first. The charter stays pristine as the promise | owner session 2026-08-26; PROMISE_VS_ACTUAL_REVIEW_2026-08-05.md S1/NF-2; issues #40/#41 |
 
 ### Structural deviations from the charter layout (issue #14 — ACCEPT, no code churn)
 
