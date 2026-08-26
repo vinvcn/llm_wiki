@@ -29,10 +29,10 @@ const PNG_BYTES = Buffer.from(
   "base64",
 )
 
-const ASSET_DIR = path.join(DATA_DIR, "assets")
+const PROJECT_DIR = path.join(DATA_DIR, "proj")
+const ASSET_DIR = path.join(PROJECT_DIR, "assets")
 const PNG_PATH = path.join(ASSET_DIR, "pixel.png")
 const TXT_PATH = path.join(ASSET_DIR, "note.txt")
-const PROJECT_DIR = path.join(DATA_DIR, "proj")
 
 let projectId = "legacy-proj-id"
 
@@ -53,6 +53,18 @@ beforeAll(() => {
 afterAll(() => {
   delete process.env.LLM_WIKI_API_TOKEN
   try { rmSync(DATA_DIR, { recursive: true, force: true }) } catch { /* noop */ }
+})
+
+// Register the project up front: /api/raw is confined to registered project
+// roots (owner decision 2026-08-26 — no client-facing filesystem exposure),
+// so the raw suite needs it before the /api/v1 registration test runs.
+beforeAll(async () => {
+  await request(app)
+    .put("/api/store/app-state.json")
+    .send({
+      projectRegistry: { [projectId]: { id: projectId, name: "Legacy Proj", path: PROJECT_DIR } },
+      lastProject: { id: projectId, path: PROJECT_DIR },
+    })
 })
 
 // ── /api/raw ──────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import { addSseClient, clientCount, emit } from "./events.js"
 import { EventTypes } from "./events/bus.js"
 import { handleProxy } from "./proxy.js"
 import { applyProxyFromStore, resolveProxyStorePath } from "./proxy-env.js"
+import { isAllowedRawPath } from "./raw.js"
 import { handleApiV1 } from "./api-v1.js"
 import { exitOnBindFailure } from "./listen-guard.js"
 import { startClipServer, getClipStatus, CLIP_PORT } from "./clip-server.js"
@@ -102,6 +103,9 @@ async function serveStatic(req, res, pathname) {
 
 async function streamRawFile(res, rawPath) {
   if (!rawPath || rawPath.includes("\0")) { res.writeHead(400); res.end("Bad path"); return }
+  // Same project-root confinement as api/raw on index-v2 (owner decision:
+  // no client-facing filesystem exposure outside registered projects).
+  if (!(await isAllowedRawPath(rawPath))) { res.writeHead(404); res.end("Not found"); return }
   let stat
   try { stat = await fsp.stat(rawPath) } catch { res.writeHead(404); res.end("Not found"); return }
   if (stat.isDirectory()) { res.writeHead(400); res.end("Is a directory"); return }

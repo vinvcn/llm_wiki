@@ -294,13 +294,25 @@ describe("hostMatchesNoProxy (reqwest NO_PROXY semantics)", () => {
 describe("applyProxyFromStore (shared app-state.json)", () => {
   let dir = null
   let prevStore = null
+  let prevProxyEnv = null
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-proxy-store-"))
     prevStore = process.env.LLM_WIKI_STORE_FILE
+    // Isolate from host proxy env (dev shells commonly export HTTP_PROXY);
+    // these tests assert what applyProxyFromStore itself does to the env.
+    prevProxyEnv = {}
+    for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]) {
+      prevProxyEnv[key] = process.env[key]
+      delete process.env[key]
+    }
   })
   afterEach(() => {
     if (prevStore === undefined) delete process.env.LLM_WIKI_STORE_FILE
     else process.env.LLM_WIKI_STORE_FILE = prevStore
+    for (const [key, value] of Object.entries(prevProxyEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     fs.rmSync(dir, { recursive: true, force: true })
   })
   it("parses proxy config from the store file", () => {
