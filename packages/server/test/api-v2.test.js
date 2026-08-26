@@ -228,6 +228,72 @@ describe("maintenance", () => {
     expect(res.status).toBe(200)
     expect(Array.isArray(res.body.history)).toBe(true)
   })
+
+  it("POST /export writes a zip archive to the destination", async () => {
+    const destination = path.join(DATA_DIR, "export.zip")
+    const res = await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/export`)
+      .send({ destination })
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.destination).toBe(destination)
+    // The zip is a real archive that round-trips the project (wiki index +
+    // hidden .llm-wiki state) — the same bytes the desktop importer accepts.
+    const { default: JSZip } = await import("jszip")
+    const zip = await JSZip.loadAsync(await import("node:fs/promises").then((f) => f.readFile(destination)))
+    const names = new Set(Object.keys(zip.files))
+    expect(names.has("wiki/index.md")).toBe(true)
+    expect(names.has("wiki/concepts/attention.md")).toBe(true)
+    expect(names.has(".llm-wiki/")).toBe(true)
+  })
+
+  it("POST /export rejects a destination inside the project with the exact desktop error", async () => {
+    const res = await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/export`)
+      .send({ destination: path.join(PROJECT_DIR, "inner.zip") })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe("VALIDATION_ERROR")
+    expect(res.body.error.message).toBe("Export destination must be outside the project directory")
+  })
+
+  it("POST /import extracts an archive into an empty destination", async () => {
+    // Round-trip through the real surface: export the project, then import
+    // the archive into a fresh dir; the imported wiki/index.md must exist.
+    const archive = path.join(DATA_DIR, "rt.zip")
+    await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/export`)
+      .send({ destination: archive })
+      .expect(200)
+    const destination = path.join(DATA_DIR, "imported")
+    const res = await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/import`)
+      .send({ archivePath: archive, destination })
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.root).toBe(destination)
+    const index = await import("node:fs/promises").then((f) =>
+      f.readFile(path.join(destination, "wiki", "index.md"), "utf-8"))
+    expect(index).toContain("Attention")
+  })
+
+  it("POST /import rejects a non-project archive with the exact desktop error", async () => {
+    const bad = path.join(DATA_DIR, "bad.zip")
+    writeFileSync(bad, "not a zip")
+    const res = await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/import`)
+      .send({ archivePath: bad, destination: path.join(DATA_DIR, "nope") })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe("VALIDATION_ERROR")
+    expect(res.body.error.message).toMatch(/zip|central directory/i)
+  })
+
+  it("validates the export/import bodies", async () => {
+    const res = await request(app)
+      .post(`/api/v2/projects/${projectId}/maintenance/export`)
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe("VALIDATION_ERROR")
+  })
 })
 
 // ── Ingest ────────────────────────────────────────────────────────────────

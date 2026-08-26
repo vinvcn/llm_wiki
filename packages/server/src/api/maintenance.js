@@ -17,11 +17,23 @@ import {
 } from "@llm-wiki/api-types"
 import { safeJoin } from "../store/project-paths.js"
 import { dispatch } from "../invoke.js"
+import { ApiError, ErrorCode } from "../errors.js"
 import { listFileHistory, restoreFileHistory } from "../commands/fileHistory.js"
 import { emit } from "../events.js"
 import { EventTypes } from "../events/bus.js"
 
 const router = Router({ mergeParams: true })
+
+// Map command errors to the structured envelope while preserving the exact
+// desktop error strings (project_maintenance.rs): e.g. "Import destination
+// must be empty", "Archive is not an LLM Wiki project (wiki/index.md is
+// missing)". The global handler would otherwise scrub the reason into a
+// generic 500.
+function mapMaintenanceError(err) {
+  if (err instanceof ApiError) return err
+  const message = typeof err?.message === "string" ? err.message : "Maintenance command failed"
+  return new ApiError(ErrorCode.VALIDATION_ERROR, message, { cause: err })
+}
 
 // POST /api/v2/projects/:id/maintenance/rebuild-index
 router.post("/rebuild-index", async (req, res, next) => {
@@ -51,7 +63,7 @@ router.post("/rebuild-index", async (req, res, next) => {
     })
     res.json(result)
   } catch (err) {
-    next(err)
+    next(mapMaintenanceError(err))
   }
 })
 
@@ -62,7 +74,7 @@ router.post("/export", validate({ body: ExportBodySchema }), async (req, res, ne
     await dispatch("export_project_archive", { projectPath: req.projectRoot, destination })
     res.json({ ok: true, destination })
   } catch (err) {
-    next(err)
+    next(mapMaintenanceError(err))
   }
 })
 
@@ -73,7 +85,7 @@ router.post("/import", validate({ body: ImportBodySchema }), async (req, res, ne
     const root = await dispatch("import_project_archive", { archivePath, destination })
     res.json({ ok: true, root })
   } catch (err) {
-    next(err)
+    next(mapMaintenanceError(err))
   }
 })
 

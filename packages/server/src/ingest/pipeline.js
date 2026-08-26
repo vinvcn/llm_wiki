@@ -478,7 +478,7 @@ export async function runIngestPipeline(task, env, deps = {}) {
   let analysis = precomputedAnalysis
 
   if (!analysis) {
-    let streamError = null
+      let streamError = null
     try {
       analysis = await streamChat(
         llmConfig,

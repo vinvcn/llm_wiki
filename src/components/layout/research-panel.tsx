@@ -33,7 +33,19 @@ export function ResearchPanel() {
 
   const running = tasks.filter((t) => ["searching", "synthesizing", "saving"].includes(t.status))
   const queued = tasks.filter((t) => t.status === "queued")
-  const done = tasks.filter((t) => t.status === "done" || t.status === "error")
+
+  // One keyed list (running -> queued -> done, insertion order within each
+  // group) so a card is NOT re-mounted when its status leaves `running`.
+  // Re-mounting used to destroy the card's `expanded` state right when the
+  // task completed, collapsing the answer the user was just reading.
+  const groupOrder: Record<ResearchTask["status"], number> = {
+    searching: 0, synthesizing: 0, saving: 0,
+    queued: 1,
+    done: 2, error: 2,
+  }
+  const orderedTasks = [...tasks].sort((a, b) =>
+    (groupOrder[a.status] - groupOrder[b.status]) || (a.createdAt - b.createdAt)
+  )
 
   function handleStartResearch() {
     const topic = inputValue.trim()
@@ -93,13 +105,7 @@ export function ResearchPanel() {
           </div>
         ) : (
           <div className="flex flex-col gap-1 p-2">
-            {running.map((task) => (
-              <ResearchTaskCard key={task.id} task={task} onRemove={removeTask} />
-            ))}
-            {queued.map((task) => (
-              <ResearchTaskCard key={task.id} task={task} onRemove={removeTask} />
-            ))}
-            {done.map((task) => (
+            {orderedTasks.map((task) => (
               <ResearchTaskCard key={task.id} task={task} onRemove={removeTask} />
             ))}
           </div>
@@ -220,9 +226,21 @@ function SynthesisBlock({ synthesis, isStreaming }: { synthesis: string; isStrea
 
 function ResearchTaskCard({ task, onRemove }: { task: ResearchTask; onRemove: (id: string) => void }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(
-    task.status === "synthesizing" || task.status === "searching"
-  )
+  const autoExpanded = useRef(false)
+  const [expanded, setExpanded] = useState(false)
+
+  // Auto-open a task the moment it starts running, and never auto-collapse
+  // it afterwards: the card streams its synthesis while active and keeps the
+  // finished answer visible inline (the old mount-time default collapsed the
+  // card the instant the task completed). The latch means a manual collapse
+  // during the run stays honored through later status changes.
+  useEffect(() => {
+    if (autoExpanded.current) return
+    if (task.status === "searching" || task.status === "synthesizing") {
+      autoExpanded.current = true
+      setExpanded(true)
+    }
+  }, [task.status])
   const openFileInPreview = useWikiStore((s) => s.openFileInPreview)
   const project = useWikiStore((s) => s.project)
 

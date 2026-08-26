@@ -27,6 +27,10 @@ export const IngestTaskSchema = z.object({
   updated_at: z.number().nullable().optional(),
   not_before: z.number().default(0),
   folder_context: z.string().default(""),
+  // Migration 014 (issue #32): liveness heartbeat written by the
+  // orchestrator every ~15s while a task is processing, so pollers can
+  // distinguish a healthy long LLM call from a hung/crashed run.
+  heartbeat_at: z.number().nullable().optional(),
 })
 
 export const IngestQueueResponseSchema = z.object({

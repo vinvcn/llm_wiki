@@ -8,7 +8,7 @@ import { useReviewStore } from "@/stores/review-store"
 import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { BASE_FONT_SIZE_PX, useZoomStore } from "@/stores/zoom-store"
-import { openProject } from "@/commands/fs"
+import { openProject, clipServerStatus } from "@/commands/fs"
 import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadWikiSearchMode, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
 import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
 import { setupAutoSave } from "@/lib/auto-save"
@@ -509,9 +509,22 @@ function App() {
         }
       }).catch((err) => console.error("Failed to configure project file sync:", err))
       // Notify local clip server of the current project + all recent projects.
-      // The clip server (Chrome extension companion on :19827) is desktop-only;
-      // skip in the browser web build to avoid connection-refused noise.
-      if (!(globalThis as { __LLM_WIKI_WEB__?: boolean }).__LLM_WIKI_WEB__) {
+      // The clip server (Chrome extension companion on :19827) is hosted by
+      // the desktop app OR the web backend (same protocol). In the browser
+      // web build we first check the companion is actually listening, so a
+      // server without the listener produces no connection-refused noise.
+      let clipperUp = true
+      if ((globalThis as { __LLM_WIKI_WEB__?: boolean }).__LLM_WIKI_WEB__) {
+        try {
+          const status = await clipServerStatus()
+          // "port_conflict" means the desktop app owns the port — something
+          // still speaks the protocol, so register there too.
+          clipperUp = status === "running" || status === "port_conflict"
+        } catch {
+          clipperUp = false
+        }
+      }
+      if (clipperUp) {
         fetch("http://127.0.0.1:19827/project", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

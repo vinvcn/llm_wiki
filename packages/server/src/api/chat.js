@@ -81,22 +81,26 @@ function chatProjectLookup() {
 }
 
 // POST /api/v2/projects/:id/chat - start a chat turn (streaming).
-// Issue #21: the request no longer carries history. The agent loop loads
-// prior messages for sessionId from chat_messages and persists each
-// completed message as it lands.
+// Cross-client context sourcing (desktop contract): the client-held history
+// round-trip (history + historyExplicit) wins verbatim when provided;
+// otherwise the agent loop hydrates the last 12 messages from the SHARED
+// .llm-wiki/agent-sessions files and falls back to chat_messages for legacy
+// sessions; completed turns append to the shared files (persistSession).
 router.post("/:id/chat", chatProjectLookup(), validate({ body: ChatRequestSchema }), async (req, res, next) => {
   try {
-    const { message, sessionId, mode, tools, topK, includeContent, skills, resume, regenerate, historyLimit } = req.validated.body
+    const { message, sessionId, mode, tools, topK, includeContent, skills, history, historyExplicit, resume, regenerate, historyLimit } = req.validated.body
     const request = {
       message,
-      sessionId: sessionId || crypto.randomUUID(),
-      runId: crypto.randomUUID(),
+      sessionId: sessionId || `ui_${crypto.randomUUID()}`,
+      runId: `run_${crypto.randomUUID()}`,
       mode,
       retrievalMode: "standard",
       tools: tools || { wiki: true, web: false, anytxt: false },
       topK,
       includeContent,
       skills,
+      history,
+      historyExplicit,
       resume,
       regenerate,
       ...(historyLimit !== undefined ? { historyLimit } : {}),
@@ -525,6 +529,12 @@ router.get(
 )
 
 // PATCH /api/v2/projects/:id/chat/sessions/:sessionId - rename
+// Rename-or-create: the web client PATCHes the sidebar auto-title for a
+// conversation it created locally (client uuid) BEFORE the first agent turn
+// lazily creates the server row (ensureSession) — a strict 404 made every
+// first chat log a failed request / console error and the title never
+// survived a reload. An id that belongs to ANOTHER project stays 404
+// (never adopted; same behavior as before).
 router.patch(
   "/:id/chat/sessions/:sessionId",
   chatProjectLookup(),
@@ -532,8 +542,11 @@ router.patch(
   (req, res) => {
     const { sessionId } = req.validated.params
     const existing = chatStore.getSessionByUuid(sessionId)
-    if (!existing || existing.projectId !== req.projectId) {
+    if (existing && existing.projectId !== req.projectId) {
       throw new ApiError(ErrorCode.NOT_FOUND, `Session ${sessionId} not found`)
+    }
+    if (!existing) {
+      chatStore.createSession(req.projectId, { uuid: sessionId, title: req.validated.body.title })
     }
     const session = chatStore.renameSession(sessionId, req.validated.body.title)
     res.json({ session })

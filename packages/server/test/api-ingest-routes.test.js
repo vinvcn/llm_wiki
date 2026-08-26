@@ -236,3 +236,20 @@ describe("queue routes do not collide", () => {
     expect(list.body.count).toBe(0)
   })
 })
+
+describe("heartbeat field exposure (issue #32)", () => {
+  it("GET /queue returns heartbeat_at on the task row (null until claimed)", async () => {
+    const enq = await request(app).post(ingest("/upload")).attach("file", Buffer.from("hb"), "hb1.txt")
+    const taskId = enq.body.taskId
+    const list = await request(app).get(ingest("/queue"))
+    expect(list.status).toBe(200)
+    const task = list.body.tasks.find((t) => t.id === taskId)
+    expect(task).toBeTruthy()
+    expect(task).toHaveProperty("heartbeat_at")
+    expect(task.heartbeat_at).toBeNull()
+    const single = await request(app).get(ingest(`/queue/${taskId}`))
+    expect(single.status).toBe(200)
+    expect(single.body.heartbeat_at).toBeNull()
+    await request(app).delete(ingest(`/queue/${taskId}`))
+  })
+})

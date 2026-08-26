@@ -156,6 +156,36 @@ function joinAnthropic(base) {
   return `${base}/v1/messages`
 }
 
+
+// Desktop LlmConfig::is_usable_for_backend_http (src-tauri/src/agent/provider.rs):
+// the HTTP agent loop can only run providers reached over HTTP(S) with complete
+// credentials. Missing keys/models and CLI-only providers (claude-code /
+// codex-cli) are NOT usable; the runtime then degrades to the offline
+// retrieval contract (agent-legacy.js) instead of calling an LLM or surfacing
+// a provider error. Mirrors the Rust match arm exactly (unknown provider =>
+// false).
+export function isUsableForBackendHttp(cfg) {
+  const provider = String(cfg?.provider ?? "")
+  const hasModel = String(cfg?.model ?? "").trim() !== ""
+  switch (provider) {
+    case "openai":
+    case "anthropic":
+    case "google":
+    case "azure":
+    case "minimax":
+      return hasModel && String(cfg?.apiKey ?? "").trim() !== ""
+    case "ollama":
+      return hasModel && String(cfg?.ollamaUrl ?? "").trim() !== ""
+    case "custom":
+      return hasModel && String(cfg?.customEndpoint ?? "").trim() !== ""
+    // "claude-code" | "codex-cli" need subprocess/session wiring and are
+    // handled by the CLI transports, not by the HTTP agent; anything else is
+    // unknown. Same as the desktop match arm => false.
+    default:
+      return false
+  }
+}
+
 /** Turn a resolved LlmConfig into {wire, url, headers} for an outbound call. */
 export function normalizeEndpoint(cfg) {
   const provider = cfg.provider

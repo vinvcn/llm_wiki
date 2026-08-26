@@ -156,6 +156,37 @@ describe("v2 chat session endpoints", () => {
     expect(byNumeric.body.sessions).toHaveLength(1)
   })
 
+  it("rename-or-create: PATCH auto-creates a missing session (web title sync)", async () => {
+    // The web client PATCHes the sidebar auto-title for a conversation it
+    // created locally (client uuid) BEFORE the first agent turn lazily
+    // creates the server row — a strict 404 pushed a failed request into the
+    // browser on every first chat and the title never survived a reload.
+    const p = await createProject("chat-proj-upsert")
+
+    const patched = await request(app)
+      .patch(`/api/v2/projects/${p.id}/chat/sessions/client-created-conv-123`)
+      .send({ title: "Auto Title From First Message" })
+    expect(patched.status).toBe(200)
+    expect(patched.body.session.id).toBe("client-created-conv-123")
+    expect(patched.body.session.title).toBe("Auto Title From First Message")
+
+    // The row now exists: list + get both see it with the synced title.
+    const list = await request(app).get(`/api/v2/projects/${p.id}/chat/sessions`)
+    expect(list.status).toBe(200)
+    expect(list.body.sessions).toHaveLength(1)
+    expect(list.body.sessions[0].id).toBe("client-created-conv-123")
+    const one = await request(app).get(`/api/v2/projects/${p.id}/chat/sessions/client-created-conv-123`)
+    expect(one.status).toBe(200)
+    expect(one.body.session.title).toBe("Auto Title From First Message")
+
+    // Rename again on the now-existing row still works (idempotent).
+    const again = await request(app)
+      .patch(`/api/v2/projects/${p.id}/chat/sessions/client-created-conv-123`)
+      .send({ title: "Renamed Later" })
+    expect(again.status).toBe(200)
+    expect(again.body.session.title).toBe("Renamed Later")
+  })
+
   it("404s for unknown projects and sessions", async () => {
     const unknownNumeric = await request(app).get("/api/v2/projects/99999/chat/sessions")
     expect(unknownNumeric.status).toBe(404)

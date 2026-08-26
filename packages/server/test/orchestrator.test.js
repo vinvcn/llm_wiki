@@ -569,3 +569,50 @@ describe("sweep timer", () => {
     }
   })
 })
+
+describe("liveness heartbeat (issue #32)", () => {
+  it("advances heartbeat_at/updated_at while processing and stops after completion", async () => {
+    process.env.LLM_WIKI_INGEST_HEARTBEAT_MS = "100" // test hook: fast cadence
+    try {
+      const gate = deferred()
+      vi.mocked(runIngestPipeline).mockImplementation(async () => {
+        await gate.promise
+        return successResult(["wiki/concepts/hb.md"])
+      })
+      const id = enq(projA.id, "raw/sources/hb-live.md")
+      orch.startIngestOrchestrator()
+
+      // Stage boundary fires once, then the row would read frozen without the
+      // heartbeat — hold the pipeline open past several heartbeat ticks.
+      const claimed = await new Promise((resolve) => {
+        const t = setInterval(() => {
+          const row = q.getIngestTask(id)
+          if (row?.status === "processing") { clearInterval(t); resolve(row) }
+        }, 5)
+      })
+      expect(claimed.heartbeat_at).toBeNull()
+
+      await waitFor(() => q.getIngestTask(id)?.heartbeat_at != null)
+      const first = q.getIngestTask(id).heartbeat_at
+      // The row keeps ticking while the long stage runs.
+      await waitFor(() => q.getIngestTask(id)?.heartbeat_at > first)
+      const during = q.getIngestTask(id)
+      expect(during.status).toBe("processing")
+      expect(during.progress).toBe(0) // progress itself never moved
+
+      gate.resolve(successResult(["wiki/concepts/hb.md"]))
+      await waitFor(() => q.getIngestTask(id)?.status === "completed")
+      const done = q.getIngestTask(id)
+      expect(done.heartbeat_at).toBeGreaterThan(0)
+
+      // Heartbeat stops once the row leaves 'processing': let several
+      // intervals pass and confirm no further ticks landed.
+      const stable = done.heartbeat_at
+      await new Promise((r) => setTimeout(r, 350))
+      expect(q.getIngestTask(id).heartbeat_at).toBe(stable)
+      expect(q.getIngestTask(id).updated_at).toBe(done.updated_at)
+    } finally {
+      delete process.env.LLM_WIKI_INGEST_HEARTBEAT_MS
+    }
+  })
+})

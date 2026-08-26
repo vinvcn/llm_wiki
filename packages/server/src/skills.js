@@ -138,7 +138,12 @@ function discoverCandidates(root) {
           continue
         }
         if (path.extname(e.name).toLowerCase() === ".md") {
-          const id = normalizeSkillName(path.basename(e.name, ".md"))
+          // Rust uses file_stem(), which strips the final extension
+          // REGARDLESS of case ("Reviewer.MD" -> "Reviewer"); Node's
+          // basename(name, ".md") suffix match is case-sensitive and would
+          // yield "Reviewer.MD" instead.
+          const stem = e.name.slice(0, e.name.length - path.extname(e.name).length)
+          const id = normalizeSkillName(stem)
           if (id) out.push({ id, path: full })
         }
         continue
@@ -232,37 +237,185 @@ export function renderSkillPlannerContext(skills, skillMode) {
   return trimChars(out, 8000)
 }
 
-// ── skill.read_file reference resolution (mirrors runtime reference read) ─
-// Accepts either an absolute path, or a "<skillname>/<rel>" prefix that maps
-// onto that skill's base_dir, or a path relative to the project. Rejects
-// symlinks and files larger than MAX_SKILL_REFERENCE_BYTES, and refuses to
-// escape a skill's base_dir when a skill prefix was used.
-export function readSkillReference(projectPath, skills, refPath) {
-  const raw = String(refPath || "").trim()
-  if (!raw) throw new Error("skill.read_file: path is required")
-  let target = null
-  // prefix form: skillname/relative
-  const slash = raw.indexOf("/")
+// ── skill.read_file reference resolution (faithful port of
+// read_active_skill_file + resolve_skill_read_target in runtime.rs) ────────
+// The desktop tool reads ONLY inside an active skill's directory. Resolution
+// follows the Rust steps exactly: an explicit `skill` arg (or a single active
+// skill otherwise); absolute paths must canonicalize inside a skill base;
+// unique-existing relative paths; <skill>/<rel> or <skill>:<rel> prefixes;
+// then the raw path against the selected skill. Safe relative paths only, and
+// canonical containment blocks symlinks that escape the skill directory.
+
+function isWithin(target, base) {
+  if (target === base) return true
+  return target.startsWith(base.endsWith(path.sep) ? base : base + path.sep)
+}
+
+function skillNameLike(value) {
+  const v = String(value ?? "").trim()
+  if (!v || !v.includes("-")) return false
+  return [...v].every((ch) => /[A-Za-z0-9_-]/.test(ch))
+}
+
+function skillMatchesRequestedName(skill, requested) {
+  const requestedLower = String(requested ?? "").toLowerCase()
+  if (String(skill.name ?? "").toLowerCase() === requestedLower) return true
+  const folderMatches = (p) => {
+    const name = path.basename(String(p ?? ""))
+    const nameLower = name.toLowerCase()
+    return nameLower === requestedLower || nameLower.endsWith(`-${requestedLower}`)
+  }
+  return folderMatches(skill.baseDir) || folderMatches(path.dirname(skill.location ?? ""))
+}
+
+function selectActiveSkillForRead(skills, requested) {
+  const trimmed = String(requested ?? "").trim()
+  if (!trimmed) {
+    if (skills.length === 1) return skills[0]
+    throw new Error("skill.read_file requires skill when multiple skills are active")
+  }
+  const skill = skills.find((candidate) => skillMatchesRequestedName(candidate, trimmed))
+  if (!skill) throw new Error(`Active skill not found: ${trimmed}`)
+  return skill
+}
+
+function isSafeRelativeSkillPath(value) {
+  const s = String(value)
+  if (!s || path.isAbsolute(s)) return false
+  // Rust: every component must be Normal or CurDir — no "..", no parent/root.
+  return s.split(/[\\/]+/).filter(Boolean).every((part) => part !== "..")
+}
+
+function normalizeRequestedPathForSkill(skill, requestedPath) {
+  const raw = String(requestedPath ?? "")
+  if (path.isAbsolute(raw)) {
+    let target
+    try { target = fs.realpathSync(raw) } catch (e) { throw new Error(`Failed to resolve skill file: ${e.message}`) }
+    let base
+    try { base = fs.realpathSync(skill.baseDir) } catch (e) { throw new Error(`Failed to resolve skill directory: ${e.message}`) }
+    if (!isWithin(target, base)) {
+      throw new Error("skill.read_file absolute path does not belong to requested skill")
+    }
+    return path.relative(base, target).split(path.sep).join("/")
+  }
+  const normalized = raw.trim().replaceAll("\\", "/")
+  const slash = normalized.indexOf("/")
   if (slash > 0) {
-    const prefix = raw.slice(0, slash)
-    const rest = raw.slice(slash + 1)
-    const skill = skills.find((s) => s.name.toLowerCase() === prefix.toLowerCase()
-      || path.basename(s.baseDir).toLowerCase() === prefix.toLowerCase())
-    if (skill) {
-      const base = path.resolve(skill.baseDir)
-      const cand = path.resolve(base, rest)
-      if (cand === base || cand.startsWith(base + path.sep)) target = cand
+    const prefix = normalized.slice(0, slash)
+    const rest = normalized.slice(slash + 1)
+    if (skillMatchesRequestedName(skill, prefix)) return rest
+    if (skillNameLike(prefix)) throw new Error("skill.read_file path prefix does not match requested skill")
+  }
+  const colon = normalized.indexOf(":")
+  if (colon > 0) {
+    const prefix = normalized.slice(0, colon)
+    const rest = normalized.slice(colon + 1).replace(/^\/+/, "")
+    if (skillMatchesRequestedName(skill, prefix)) return rest
+    if (skillNameLike(prefix)) throw new Error("skill.read_file path prefix does not match requested skill")
+  }
+  return raw
+}
+
+function resolveAbsoluteSkillPath(skills, requestedPath) {
+  const raw = String(requestedPath ?? "")
+  if (!path.isAbsolute(raw)) return null
+  let target
+  try { target = fs.realpathSync(raw) } catch (e) { throw new Error(`Failed to resolve skill file: ${e.message}`) }
+  for (const skill of skills) {
+    let base
+    try { base = fs.realpathSync(skill.baseDir) } catch (e) { throw new Error(`Failed to resolve skill directory: ${e.message}`) }
+    if (isWithin(target, base)) {
+      const rel = path.relative(base, target).split(path.sep).join("/")
+      if (rel) return { skill, relativePath: rel }
     }
   }
-  if (!target) {
-    target = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(projectPath, raw)
+  return null
+}
+
+function splitSkillPathPrefix(normalized) {
+  const colon = normalized.indexOf(":")
+  if (colon > 0) {
+    const prefix = normalized.slice(0, colon)
+    if (skillNameLike(prefix)) return [prefix, normalized.slice(colon + 1).replace(/^\/+/, "")]
   }
-  let st
-  try { st = fs.lstatSync(target) } catch (e) { throw new Error(`skill.read_file: ${e.message}`) }
-  if (st.isSymbolicLink()) throw new Error("skill.read_file: symlinks are not allowed")
-  if (!st.isFile()) throw new Error("skill.read_file: not a file")
-  if (st.size > MAX_SKILL_REFERENCE_BYTES) throw new Error("skill.read_file: file too large")
-  return fs.readFileSync(target, "utf-8")
+  const slash = normalized.indexOf("/")
+  if (slash > 0) return [normalized.slice(0, slash), normalized.slice(slash + 1)]
+  return null
+}
+
+function resolvePrefixedSkillPath(skills, requestedPath) {
+  const normalized = String(requestedPath ?? "").trim().replaceAll("\\", "/")
+  const split = splitSkillPathPrefix(normalized)
+  if (!split) return null
+  const [prefix, rest] = split
+  if (!rest.trim()) return null
+  const matched = skills.filter((skill) =>
+    skillMatchesRequestedName(skill, prefix) && fs.existsSync(path.join(skill.baseDir, rest)))
+  if (matched.length === 1) return { skill: matched[0], relativePath: rest }
+  if (matched.length === 0) return null
+  throw new Error(`skill.read_file prefix is ambiguous: ${prefix}`)
+}
+
+function resolveUniqueExistingSkillPath(skills, requestedPath) {
+  if (!isSafeRelativeSkillPath(requestedPath)) return null
+  const matches = []
+  for (const skill of skills) {
+    const base = path.resolve(skill.baseDir)
+    const candidate = path.resolve(base, requestedPath)
+    if (!fs.existsSync(candidate)) continue
+    let baseCanon, candCanon
+    try { baseCanon = fs.realpathSync(base) } catch (e) { throw new Error(`Failed to resolve skill directory: ${e.message}`) }
+    try { candCanon = fs.realpathSync(candidate) } catch (e) { throw new Error(`Failed to resolve skill file: ${e.message}`) }
+    if (isWithin(candCanon, baseCanon)) matches.push(skill)
+  }
+  if (matches.length === 1) return { skill: matches[0], relativePath: requestedPath }
+  if (matches.length === 0) return null
+  throw new Error(`skill.read_file path is ambiguous: ${requestedPath}`)
+}
+
+function resolveSkillReadTarget(skills, requestedSkill, requestedPath) {
+  const requested = String(requestedSkill ?? "").trim()
+  if (requested) {
+    const skill = selectActiveSkillForRead(skills, requested)
+    return { skill, relativePath: normalizeRequestedPathForSkill(skill, requestedPath) }
+  }
+  const absolute = resolveAbsoluteSkillPath(skills, requestedPath)
+  if (absolute) return absolute
+  const unique = resolveUniqueExistingSkillPath(skills, requestedPath)
+  if (unique) return unique
+  const prefixed = resolvePrefixedSkillPath(skills, requestedPath)
+  if (prefixed) return prefixed
+  const skill = selectActiveSkillForRead(skills, null)
+  return { skill, relativePath: String(requestedPath ?? "") }
+}
+
+export function readActiveSkillFile(skills, input = {}) {
+  if (!Array.isArray(skills) || skills.length === 0) {
+    throw new Error("skill.read_file requires an active skill")
+  }
+  const requestedPath = String(input?.path ?? "").trim()
+  if (!requestedPath) throw new Error("skill.read_file requires path")
+  const { skill, relativePath } = resolveSkillReadTarget(skills, input?.skill, requestedPath)
+  if (!isSafeRelativeSkillPath(relativePath)) {
+    throw new Error("skill.read_file path must be a safe relative path inside the skill directory")
+  }
+  let baseCanon
+  try { baseCanon = fs.realpathSync(path.resolve(skill.baseDir)) } catch (e) { throw new Error(`Failed to resolve skill directory: ${e.message}`) }
+  const targetCanon = (() => {
+    try { return fs.realpathSync(path.resolve(skill.baseDir, relativePath)) } catch (e) { throw new Error(`Failed to resolve skill file: ${e.message}`) }
+  })()
+  if (!isWithin(targetCanon, baseCanon)) {
+    throw new Error("skill.read_file cannot read outside the active skill directory")
+  }
+  const meta = fs.lstatSync(targetCanon)
+  if (meta.isSymbolicLink() || !meta.isFile()) {
+    throw new Error("skill.read_file target is not a regular file")
+  }
+  if (meta.size > MAX_SKILL_REFERENCE_BYTES) {
+    throw new Error(`skill.read_file target is too large (max ${MAX_SKILL_REFERENCE_BYTES} bytes)`)
+  }
+  const content = fs.readFileSync(targetCanon, "utf-8")
+  return { skill: skill.name, path: relativePath, content }
 }
 
 export { MAX_SKILL_REFERENCE_BYTES }

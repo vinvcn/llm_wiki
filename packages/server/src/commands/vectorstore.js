@@ -58,12 +58,68 @@ function projectKey(projectPath) {
   return pathKey
 }
 
+const MAX_PAGE_ID_CHARS = 256
+
+// Rust's char::is_control() is Unicode general category Cc: the C0 controls
+// U+0000–U+001F plus the C1 controls U+007F–U+009F.
+function isControlCharCode(cp) {
+  return cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)
+}
+
+// 1:1 port of vectorstore.rs's is_disallowed_page_id_char(c: char). The Rust
+// side rejects quotes/separators (interpolated into LanceDB filters and debug
+// chunk ids) and every format/invisible character, so visually identical ids
+// cannot differ only by soft hyphen, zero-width, bidi, tag, or separator
+// characters.
+function isDisallowedPageIdChar(ch) {
+  const cp = ch.codePointAt(0)
+  if (isControlCharCode(cp)) return true
+  return (
+    cp === 0x2f /* / */ || cp === 0x5c /* \\ */ ||
+    cp === 0x27 /* ' */ || cp === 0x22 /* " */ ||
+    cp === 0x00ad /* soft hyphen */ || cp === 0x061c /* arabic letter mark */ ||
+    (cp >= 0x200b && cp <= 0x200f) || /* zero-width space / ZWNJ / ZWJ / LRM / RLM */
+    (cp >= 0x2028 && cp <= 0x202e) || /* line/para separator + bidi */
+    (cp >= 0x2060 && cp <= 0x206f) || /* word joiner + invisible operators */
+    cp === 0xfeff /* BOM */ ||
+    (cp >= 0xfff9 && cp <= 0xfffb) || /* interlinear annotations */
+    (cp >= 0xe0000 && cp <= 0xe007f) /* tags */
+  )
+}
+
+// Rust's `{:?}` for a char, as used in the disallowed-character error message:
+// printable ASCII renders quoted ('/'), quotes/backslash and named control
+// escapes render escaped, everything else renders as '\u{<lowercase hex>}'
+// (char::escape_debug — only these categories can reach this branch, so the
+// mapping is exhaustive enough for the contract).
+function rustCharDebug(ch) {
+  if (ch === "'") return "'\\''"
+  if (ch === "\\") return "'\\\\'"
+  if (ch === "\0") return "'\\0'"
+  if (ch === "\n") return "'\\n'"
+  if (ch === "\r") return "'\\r'"
+  if (ch === "\t") return "'\\t'"
+  const cp = ch.codePointAt(0)
+  if (cp >= 0x20 && cp <= 0x7e) return `'${ch}'`
+  return `'\\u{${cp.toString(16)}}'`
+}
+
+// Rust's validate_page_id_common: rejects empty ids and ids over
+// MAX_PAGE_ID_CHARS characters (counting Unicode scalar values — one char per
+// code point, not per UTF-16 code unit), then any disallowed character.
 function validatePageId(pageId) {
-  if (!pageId || typeof pageId !== "string" || pageId.length > 256) {
+  if (!pageId || typeof pageId !== "string" || pageId.length === 0) {
     throw new Error("Invalid page_id: empty or too long")
   }
-  if (/[\x00-\x1f]/.test(pageId) || /[/\\'"]/.test(pageId)) {
-    throw new Error(`Invalid page_id: contains disallowed character: ${pageId}`)
+  let charCount = 0
+  for (const ch of pageId) {
+    charCount += 1
+    if (charCount > MAX_PAGE_ID_CHARS) {
+      throw new Error("Invalid page_id: empty or too long")
+    }
+    if (isDisallowedPageIdChar(ch)) {
+      throw new Error(`Invalid page_id: contains disallowed character ${rustCharDebug(ch)}: ${pageId}`)
+    }
   }
 }
 
@@ -126,12 +182,26 @@ export async function vectorUpsertChunks({ projectPath, pageId, chunks }) {
   validatePageId(pageId)
   if (!chunks || chunks.length === 0) return
   if (!isVecAvailable()) { warnDegraded("vector_upsert_chunks"); return }
-  const dim = chunks[0].embedding?.length
-  if (!dim) throw new Error("Invalid embedding: expected non-empty array of finite numbers")
-  for (const c of chunks) validateVector(c.embedding)
-  if (!chunks.every((c) => c.embedding.length === dim)) {
-    throw new Error(`Inconsistent embedding dimensions in one upsert (expected ${dim})`)
+  // Rust: dim = chunks[0].embedding.len(); a missing/empty first embedding is
+  // the explicit "Chunk #0 has empty embedding" error.
+  const first = chunks[0]
+  if (!Array.isArray(first?.embedding) || first.embedding.length === 0) {
+    throw new Error("Chunk #0 has empty embedding")
   }
+  const dim = first.embedding.length
+  // Rust's make_batch_v2: every later chunk must match the batch dim, with the
+  // exact per-chunk error (a later empty embedding reports dim 0 here — the
+  // "empty embedding" string is reserved for chunk index 0, matching Rust).
+  for (let i = 1; i < chunks.length; i++) {
+    const c = chunks[i]
+    const len = Array.isArray(c?.embedding) ? c.embedding.length : 0
+    if (len !== dim) {
+      throw new Error(`Chunk #${c?.chunk_index ?? i} has embedding dim ${len} but batch dim is ${dim}`)
+    }
+  }
+  // Web hardening only: Rust receives f32 through serde (JSON cannot carry
+  // NaN/Infinity), so validate finite numbers at the client-trust boundary.
+  for (const c of chunks) validateVector(c.embedding)
   if (!ensureVecTable(dim)) return
   const db = getDb()
   const pid = projectKey(projectPath)
@@ -254,6 +324,123 @@ export function vectorIndexHealth({ projectPath, queryEmbedding }) {
   return n > 0 ? null : "empty"
 }
 
+// ── page-level vector commands (v1, legacy) ────────────────────────────────
+// Port of the desktop's pre-0.3.11 `wiki_vectors` LanceDB table contract
+// (src-tauri/src/commands/vectorstore.rs): one row per page, cosine distance,
+// score = 1 / (1 + distance), `vector_upsert` does delete-then-add, and
+// `vector_search` / `vector_delete` / `vector_count` degrade to [] / no-op / 0
+// when the table does not exist. Rows live in a project-scoped vec0 table
+// (`vec_pages`) in the same shared server database as vec_chunks, keyed by a
+// stable project id. Accepts both the Rust snake_case arg names and the web
+// client's camelCase convention.
+
+let pageVecTableDim = 0 // dim the live vec_pages table was created for (0 = none)
+
+function pageVecTableExists(db) {
+  return !!db.prepare(`SELECT name FROM sqlite_master WHERE name = 'vec_pages'`).get()
+}
+
+/**
+ * Ensure the legacy page-level vec0 table exists for the given embedding
+ * dimension. Mirrors ensureVecTable but uses its own vec_meta row (id = 2) so
+ * a page-level dimension change never clobbers the chunk table (and vice
+ * versa). Returns false when sqlite-vec is unavailable.
+ */
+function ensurePageVecTable(dim) {
+  if (!isVecAvailable()) return false
+  if (pageVecTableDim === dim) return true
+  const db = getDb()
+  // vec_meta is CHECK-constrained to id = 1 (chunk dim), so the page-level
+  // dim tracks its own single-row meta table, created lazily.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vec_pages_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      dim INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  const meta = db.prepare(`SELECT dim FROM vec_pages_meta WHERE id = 1`).get()
+  if (meta && meta.dim === dim && pageVecTableExists(db)) {
+    pageVecTableDim = dim
+    return true
+  }
+  db.exec(`DROP TABLE IF EXISTS vec_pages`)
+  db.exec(`
+    CREATE VIRTUAL TABLE vec_pages USING vec0(
+      page_key TEXT PRIMARY KEY,
+      project_id TEXT,
+      page_id TEXT,
+      embedding FLOAT[${dim}] distance_metric=cosine
+    )
+  `)
+  db.prepare(`
+    INSERT INTO vec_pages_meta (id, dim, updated_at) VALUES (1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET dim = excluded.dim, updated_at = excluded.updated_at
+  `).run(dim, Date.now())
+  pageVecTableDim = dim
+  return true
+}
+
+export async function vectorUpsert({ projectPath, project_path, pageId, page_id, embedding }) {
+  const pid = pageId ?? page_id
+  validatePageId(pid)
+  validateVector(embedding)
+  if (!isVecAvailable()) { warnDegraded("vector_upsert"); return }
+  if (!ensurePageVecTable(embedding.length)) return
+  const db = getDb()
+  const key = projectKey(projectPath ?? project_path)
+  const del = db.prepare(`DELETE FROM vec_pages WHERE project_id = ? AND page_id = ?`)
+  const ins = db.prepare(`
+    INSERT INTO vec_pages (page_key, project_id, page_id, embedding)
+    VALUES (?, ?, ?, ?)
+  `)
+  const tx = db.transaction(() => {
+    del.run(key, pid)
+    ins.run(`${key}:${pid}`, key, pid, JSON.stringify(embedding))
+  })
+  tx()
+}
+
+export async function vectorSearch({ projectPath, project_path, queryEmbedding, query_embedding, topK, top_k }) {
+  const q = queryEmbedding ?? query_embedding
+  const k = topK ?? top_k
+  if (!isVecAvailable()) return []
+  validateVector(q)
+  const db = getDb()
+  if (!pageVecTableExists(db)) return []
+  const meta = db.prepare(`SELECT dim FROM vec_pages_meta WHERE id = 1`).get()
+  // Query embedded by a different provider than the stored pages: no
+  // meaningful comparison — return nothing rather than garbage ranks.
+  if (!meta || meta.dim !== q.length) return []
+  const limit = Math.max(1, Math.floor(Number(k) || 10))
+  const rows = db.prepare(`
+    SELECT page_id, distance
+    FROM vec_pages
+    WHERE embedding MATCH ? AND project_id = ?
+    ORDER BY distance
+    LIMIT ?
+  `).all(JSON.stringify(q), projectKey(projectPath ?? project_path), limit)
+  return rows.map((r) => ({ page_id: r.page_id, score: 1 / (1 + r.distance) }))
+}
+
+export async function vectorDelete({ projectPath, project_path, pageId, page_id }) {
+  const pid = pageId ?? page_id
+  validatePageId(pid)
+  if (!isVecAvailable()) return
+  const db = getDb()
+  if (!pageVecTableExists(db)) return
+  db.prepare(`DELETE FROM vec_pages WHERE project_id = ? AND page_id = ?`)
+    .run(projectKey(projectPath ?? project_path), pid)
+}
+
+export async function vectorCount({ projectPath, project_path }) {
+  if (!isVecAvailable()) return 0
+  const db = getDb()
+  if (!pageVecTableExists(db)) return 0
+  return db.prepare(`SELECT COUNT(*) AS n FROM vec_pages WHERE project_id = ?`)
+    .get(projectKey(projectPath ?? project_path)).n
+}
+
 // No-ops kept for contract parity with the desktop (LanceDB housekeeping and
 // legacy-store notice in settings).
 async function vectorOptimizeChunks() { return null }
@@ -261,6 +448,11 @@ async function vectorLegacyRowCount() { return 0 }
 async function vectorDropLegacy() { return null }
 
 export const vectorCommands = {
+  // Legacy v1 page-level commands (Rust contract port).
+  vector_upsert: vectorUpsert,
+  vector_search: vectorSearch,
+  vector_delete: vectorDelete,
+  vector_count: vectorCount,
   vector_upsert_chunks: vectorUpsertChunks,
   vector_search_chunks: vectorSearchChunks,
   vector_delete_page: vectorDeletePage,

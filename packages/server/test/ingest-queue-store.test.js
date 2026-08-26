@@ -244,3 +244,68 @@ describe("deferIngestTaskForUsageLimit (usage limits do not consume attempts)", 
     expect(q.getIngestTask(id).status).toBe("failed")
   })
 })
+
+describe("heartbeat (migration 014, issue #32)", () => {
+  // Start from a clean queue so claims below are deterministic.
+  beforeAll(() => {
+    getDb().prepare("DELETE FROM ingest_queue").run()
+  })
+
+  it("migration 014 applied: heartbeat_at exists and is null before a claim", () => {
+    const id = enq(projA.id, "raw/sources/hb0.md")
+    const row = q.getIngestTask(id)
+    expect(row).toHaveProperty("heartbeat_at")
+    expect(row.heartbeat_at).toBeNull()
+    q.deleteIngestTask(id)
+  })
+
+  it("ticks heartbeat_at + updated_at while processing without moving progress/status", async () => {
+    const id = enq(projA.id, "raw/sources/hb1.md")
+    q.claimNextIngestTask(NOW)
+    const before = q.getIngestTask(id)
+    expect(before.heartbeat_at).toBeNull()
+    await await0() // ensure the heartbeat timestamp strictly advances
+    expect(q.heartbeatIngestTask(id)).toBe(true)
+    const after = q.getIngestTask(id)
+    expect(after.heartbeat_at).toBeGreaterThanOrEqual(before.updated_at ?? 0)
+    expect(after.updated_at).toBeGreaterThanOrEqual(before.updated_at ?? 0)
+    expect(after.updated_at).toBeGreaterThanOrEqual(after.heartbeat_at ?? 0)
+    // Progress/status/attempt untouched by a pure liveness tick.
+    expect(after.status).toBe("processing")
+    expect(after.progress).toBe(0)
+    expect(after.attempt_count).toBe(1)
+    q.completeIngestTask(id)
+  })
+
+  it("never resurrects a completed/failed/pending task", () => {
+    const completed = enq(projA.id, "raw/sources/hb2.md")
+    q.claimNextIngestTask(NOW)
+    q.completeIngestTask(completed)
+    const cBefore = q.getIngestTask(completed)
+    expect(q.heartbeatIngestTask(completed)).toBe(false)
+    expect(q.getIngestTask(completed)).toEqual(cBefore)
+
+    const terminal = enq(projA.id, "raw/sources/hb3.md")
+    q.claimNextIngestTask(NOW)
+    q.failIngestTask(terminal, "boom", { retryable: false })
+    const fBefore = q.getIngestTask(terminal)
+    expect(q.heartbeatIngestTask(terminal)).toBe(false)
+    expect(q.getIngestTask(terminal)).toEqual(fBefore)
+
+    const pending = enq(projA.id, "raw/sources/hb4.md")
+    const pBefore = q.getIngestTask(pending)
+    expect(q.heartbeatIngestTask(pending)).toBe(false)
+    expect(q.getIngestTask(pending)).toEqual(pBefore)
+    q.deleteIngestTask(completed)
+    q.deleteIngestTask(terminal)
+    q.deleteIngestTask(pending)
+  })
+
+  it("returns false for a missing row", () => {
+    expect(q.heartbeatIngestTask(999_999)).toBe(false)
+  })
+})
+
+function await0() {
+  return new Promise((r) => setTimeout(r, 1))
+}

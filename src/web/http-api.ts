@@ -116,9 +116,11 @@ export async function getHome(): Promise<HomeInfo> {
   return homeCache
 }
 
-/** URL that streams a server-side file to the browser (image previews etc.). */
+/** URL that streams a server-side file to the browser (image previews etc.).
+ *  <img> tags cannot send headers, so in token mode the stored token rides in
+ *  ?token= (same mechanism as the EventSource below). */
 export function rawFileUrl(path: string): string {
-  return `${API_BASE}/api/raw?path=${encodeURIComponent(path)}`
+  return authedUrl(`${API_BASE}/api/raw?path=${encodeURIComponent(path)}`)
 }
 
 // ── SSE event bus ─────────────────────────────────────────────────────────

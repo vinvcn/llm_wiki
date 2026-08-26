@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { extractPdfMarkdown } from "./extractImages.js"
 
 // Node port of the desktop `preprocess_file` command's binary-document
 // handling (src-tauri/src/commands/fs.rs + ebook.rs). The browser cannot
@@ -12,8 +13,12 @@ const TEXT_EXTS = new Set([
   "ts","tsx","jsx","py","rb","go","rs","java","c","h","cpp","hpp","sh","sql",
   "tex","bib","srt","vtt",
 ])
-const OFFICE_EXTS = new Set(["doc","docx","pptx","xls","xlsx","odt","ods","odp"])
-const EBOOK_EXTS = new Set(["epub","mobi"])
+export const OFFICE_EXTS = new Set(["doc","docx","pptx","xls","xlsx","odt","ods","odp"])
+export const EBOOK_EXTS = new Set(["epub","mobi"])
+// Placeholder sets byte-identical to src-tauri/src/commands/fs.rs read_file.
+export const IMAGE_EXTS = new Set(["png","jpg","jpeg","gif","webp","bmp","ico","tiff","tif","avif","heic","heif","svg"])
+export const MEDIA_EXTS = new Set(["mp4","webm","mov","avi","mkv","flv","wmv","m4v","mp3","wav","ogg","flac","aac","m4a","wma"])
+export const LEGACY_DOC_EXTS = new Set(["ppt","pages","numbers","key"])
 
 // ── XML helpers ───────────────────────────────────────────────────────────
 function decodeEntities(s) {
@@ -38,33 +43,16 @@ function tagTexts(xml, tag) {
   return out
 }
 
-// ── PDF (pdfjs-dist legacy build, no worker) ──────────────────────────────
-let pdfjsPromise = null
-function loadPdfjs() {
-  if (!pdfjsPromise) {
-    pdfjsPromise = import("pdfjs-dist/legacy/build/pdf.mjs").catch((e) => {
-      pdfjsPromise = null
-      throw new Error(`pdfjs-dist unavailable: ${e.message}`)
-    })
-  }
-  return pdfjsPromise
-}
-async function extractPdf(buf) {
-  const pdfjs = await loadPdfjs()
-  const doc = await pdfjs.getDocument({
-    data: new Uint8Array(buf), useSystemFonts: true, isEvalSupported: false, verbosity: 0,
-  }).promise
-  const pages = []
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i)
-    const tc = await page.getTextContent()
-    pages.push(tc.items.map((it) => it.str).join(" ").replace(/\s+/g, " ").trim())
-  }
-  return pages.filter(Boolean).join("\n\n")
+// Desktop contract (fs.rs): per-page markdown blocks shaped exactly like
+// extract_pdf_markdown with no media destination ("## Page N\n\n<text>\n",
+// blocks joined by "\n\n"), so the preprocessing cache matches across
+// clients and the source-summary pages land in the pdfium format.
+export async function extractPdf(buf) {
+  return await extractPdfMarkdown(buf, {})
 }
 
 // ── Org mode → Markdown (mirrors the Rust converter's intent) ─────────────
-function orgToMarkdown(content) {
+export function orgToMarkdown(content) {
   const out = []
   let inCode = false
   for (const rawLine of content.split(/\r?\n/)) {
@@ -259,6 +247,68 @@ function extractMobi(buf) {
   return cleaned || name
 }
 
+// ── Preprocess cache (Rust fs.rs read_cache / write_cache parity) ──────────
+// The desktop writes extracted text to <dir>/.cache/<file>.txt from
+// preprocess_file, and read_file / search_sources consult that cache when it
+// is at least as new as the original. The server mirrors the same on-disk
+// contract so ONE source folder behaves the same on both clients.
+function cachePathFor(originalPath) {
+  return path.join(path.dirname(originalPath), ".cache", `${path.basename(originalPath)}.txt`)
+}
+
+export async function readPreprocessedCache(originalPath) {
+  const cachePath = cachePathFor(originalPath)
+  let originalMtimeMs
+  let cacheMtimeMs
+  try {
+    originalMtimeMs = (await fs.stat(originalPath)).mtimeMs
+    cacheMtimeMs = (await fs.stat(cachePath)).mtimeMs
+  } catch {
+    return null
+  }
+  if (cacheMtimeMs < originalMtimeMs) return null
+  try {
+    return await fs.readFile(cachePath, "utf8")
+  } catch {
+    return null
+  }
+}
+
+/** Best-effort (Rust write_cache: only preprocess_file writes the cache). */
+export async function writePreprocessedCache(originalPath, text) {
+  try {
+    const cachePath = cachePathFor(originalPath)
+    await fs.mkdir(path.dirname(cachePath), { recursive: true })
+    await fs.writeFile(cachePath, text, "utf8")
+  } catch {
+    // A cache-write failure never fails the command.
+  }
+}
+
+// ── File-level extraction dispatchers (shared by preprocess_file and
+//    read_file, mirroring the Rust extract_office_text / extract_ebook_text
+//    match arms). ─────────────────────────────────────────────────────────
+export async function extractOfficeTextFile(filePath, ext) {
+  const buf = await fs.readFile(filePath)
+  if (ext === "xls") return await extractXlsLegacy(buf)
+  if (ext === "doc") return await extractDocLegacy(filePath)
+  const text = await extractOffice(buf, ext)
+  if (!text) throw new Error(`Could not extract text from .${ext} file`)
+  return text
+}
+
+export async function extractEbookTextFile(filePath, ext) {
+  const buf = await fs.readFile(filePath)
+  if (ext === "epub") {
+    const JSZip = (await import("jszip")).default
+    const zip = await JSZip.loadAsync(buf)
+    const text = await extractEpub(zip)
+    if (!text) throw new Error("Could not extract text from EPUB")
+    return text
+  }
+  return extractMobi(buf)
+}
+
 async function extractOffice(buf, ext) {
   const JSZip = (await import("jszip")).default
   const zip = await JSZip.loadAsync(buf)
@@ -310,32 +360,30 @@ async function extractDocLegacy(filePath) {
 
 export async function preprocessFile({ path: p }) {
   const ext = (path.extname(p).slice(1) || "").toLowerCase()
-  const buf = await fs.readFile(p)
-  if (TEXT_EXTS.has(ext) || ext === "") return buf.toString("utf-8")
-  if (ext === "org") return orgToMarkdown(buf.toString("utf-8"))
-  if (ext === "pdf") return await extractPdf(buf)
-  if (OFFICE_EXTS.has(ext)) {
-    // Legacy OLE2 .xls -> SheetJS (BIFF). Legacy OLE2 .doc -> word-extractor
-    // (best-effort; success not unit-verifiable on hosts lacking a .doc sample or
-    // LibreOffice, but failures degrade to a clean convert-first error and never
-    // crash the ingest pipeline). Modern OOXML/ODF still go through extractOffice.
-    if (ext === "xls") return await extractXlsLegacy(buf)
-    if (ext === "doc") return await extractDocLegacy(p)
-    const text = await extractOffice(buf, ext)
-    if (!text) throw new Error(`Could not extract text from .${ext} file`)
-    return text
+  if (TEXT_EXTS.has(ext) || ext === "") {
+    // Rust preprocess_file: EVERYTHING outside pdf/org/office/ebook is
+    // Ok("no preprocessing needed") — text formats are not extracted here
+    // (read_file reads them directly; the ingest pipeline's
+    // tryReadSourceTextFile reads text formats itself and only routes
+    // PREPROCESS_EXTS through the worker).
+    return "no preprocessing needed"
   }
-  if (EBOOK_EXTS.has(ext)) {
-    if (ext === "epub") {
-      const JSZip = (await import("jszip")).default
-      const zip = await JSZip.loadAsync(buf)
-      const text = await extractEpub(zip)
-      if (!text) throw new Error("Could not extract text from EPUB")
-      return text
-    }
-    return extractMobi(buf)
+  let text
+  if (ext === "org") text = orgToMarkdown(await fsp.readFile(p, "utf-8"))
+  else if (ext === "pdf") text = await extractPdf(await fsp.readFile(p))
+  else if (OFFICE_EXTS.has(ext)) {
+    // Legacy OLE2 .xls -> SheetJS (BIFF). Legacy OLE2 .doc -> word-extractor;
+    // failures degrade to a clean convert-first error and never crash the
+    // ingest pipeline. Modern OOXML/ODF still go through extractOffice.
+    text = await extractOfficeTextFile(p, ext)
+  } else if (EBOOK_EXTS.has(ext)) {
+    text = await extractEbookTextFile(p, ext)
+  } else {
+    // Rust preprocess_file: everything else is Ok("no preprocessing needed").
+    return "no preprocessing needed"
   }
-  // Unknown binary: return the same sentinel the desktop uses for "nothing to do"
-  // only for known-text-like cases; otherwise report clearly.
-  throw new Error(`Web server cannot parse '.${ext}' files. Convert to Markdown/text/PDF/Office/EPUB first.`)
+  // Rust preprocess_file writes the extraction cache for every extracted
+  // format; read_file and source.search (and the ingest pipeline) all read it.
+  await writePreprocessedCache(p, text)
+  return text
 }

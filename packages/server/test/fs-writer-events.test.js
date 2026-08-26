@@ -13,9 +13,11 @@
 //   - applyTextSelectionEdit — always modified (target pre-existence is
 //     enforced by the command itself)
 //   - createMissingWikiPage — created with the project-relative path
-//   - deleteFile — deleted ONLY on an actual removal (missing ⇒ silent no-op)
+//   - deleteFile — deleted ONLY on an actual removal; a missing path now
+//     errors like Rust fs.rs (`Failed to delete file '<path>': …`), so no
+//     frame is emitted for it
 //   - copyFile — created for the destination; copyDirectory — created per
-//     created path (the same list the command returns)
+//     created path (dirs + files; the Rust command returns the FILES only)
 //   - api/files.js upload keeps emitting its OWN single frame: the route
 //     passes suppressFileEvents so the writer-level emit doesn't duplicate it
 //   - the legacy /api/invoke bridge emits through the same writers (S5 shape)
@@ -302,9 +304,10 @@ describe("commands/fs.js writers emit file:* frames", () => {
     expect(frames).toHaveLength(1)
     expectFileFrame(0, EventTypes.FILE_DELETED, { projectId: proj.id, path: p })
 
-    // The file is gone now: the command silently no-ops ⇒ no frame.
+    // The file is gone now: Rust fs.rs delete_file ERRORS on a missing path
+    // and nothing is emitted. The web server mirrors that contract.
     frames = []
-    await fsCommands.delete_file({ path: p })
+    await expect(fsCommands.delete_file({ path: p })).rejects.toThrow(/^Failed to delete file '/)
     expect(frames).toHaveLength(0)
 
     // Directories are removable too (recursive) and emit for the dir path.
@@ -325,22 +328,34 @@ describe("commands/fs.js writers emit file:* frames", () => {
     expectFileFrame(0, EventTypes.FILE_CREATED, { projectId: proj.id, path: destination })
   })
 
-  it("copy_directory emits created per created path (its returned list)", async () => {
+  it("copy_directory returns the copied FILES only (Rust) but emits per created path", async () => {
     const source = path.join(PROJ_DIR, "copy-src")
     mkdirSync(path.join(source, "sub"), { recursive: true })
     writeFileSync(path.join(source, "a.txt"), "a")
     writeFileSync(path.join(source, "sub", "b.txt"), "b")
+    writeFileSync(path.join(source, ".hidden.txt"), "c")
     const destination = path.join(PROJ_DIR, "copied-tree")
 
     const created = await fsCommands.copy_directory({ source, destination })
-    expect(created.length).toBe(4) // dest dir, a.txt, sub dir, sub/b.txt
-    expect(frames).toHaveLength(created.length)
+    // Rust copy_directory returns the copied FILE paths only (dot-entries
+    // skipped); directories are created but not listed.
+    expect(created).toEqual([
+      path.join(destination, "a.txt").split(path.sep).join("/"),
+      path.join(destination, "sub", "b.txt").split(path.sep).join("/"),
+    ])
+    expect(existsSync(path.join(destination, ".hidden.txt"))).toBe(false)
+    expect(frames).toHaveLength(4) // dest dir, a.txt, sub dir, sub/b.txt
     for (const frame of frames) {
       expect(frame.type).toBe(EventTypes.FILE_CREATED)
       expect(frame.projectId).toBeNull()
       expect(frame.payload.projectId).toBe(proj.id)
     }
-    expect(frames.map((f) => f.payload.path).sort()).toEqual([...created].sort())
+    expect(frames.map((f) => f.payload.path).sort()).toEqual([
+      destination.split(path.sep).join("/"),
+      path.join(destination, "a.txt").split(path.sep).join("/"),
+      path.join(destination, "sub").split(path.sep).join("/"),
+      path.join(destination, "sub", "b.txt").split(path.sep).join("/"),
+    ].sort())
   })
 
   it("leaves payload.projectId null when no project claims the path", async () => {
