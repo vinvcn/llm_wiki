@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useResearchStore } from "@/stores/research-store"
 import { BottomTabBar } from "./bottom-tab-bar"
@@ -127,13 +127,11 @@ export function MobileShell({ onSwitchProject }: MobileShellProps) {
 
   const isSheetOpen = Boolean(showSheet)
 
-  // Also watch research store: if panel closed externally, close sheet
-  // (not strictly needed, but keeps sync)
-  if (researchSheetOpen && !researchPanelOpen) {
-    // Close sheet if research was toggled off elsewhere
-    // Do it via effect timing — schedule close
-    setTimeout(() => setResearchSheetOpen(false), 0)
-  }
+  useEffect(() => {
+    if (researchSheetOpen && !researchPanelOpen) {
+      setResearchSheetOpen(false)
+    }
+  }, [researchSheetOpen, researchPanelOpen])
 
   // Mobile wiki: list when no file, preview when file selected
   const isWikiView = activeView === "wiki"

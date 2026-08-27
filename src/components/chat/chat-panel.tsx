@@ -203,7 +203,7 @@ function ConversationSidebar({
   }
 
   return (
-    <div className="flex h-full w-[200px] flex-shrink-0 flex-col border-r bg-muted/30">
+    <div className="flex h-full w-full flex-shrink-0 flex-col border-r bg-muted/30 md:w-[200px]">
       <div className="border-b p-2">
         <Button
           variant="outline"
