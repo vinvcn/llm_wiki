@@ -143,7 +143,10 @@ export function normalizeBaseUrl(value?: string): string {
 }
 
 function apiPath(path: string): string {
-  return path.startsWith("/api/v1") ? path : `/api/v1${path.startsWith("/") ? path : `/${path}`}`
+  // Thin-client migration (issue #40): the MCP now talks to the main v2 API
+  // (index-v2.js, same origin as the SPA and Docker's CMD). The legacy
+  // /api/v1 surface (handleApiV1) is deleted; all routes live under /api/v2.
+  return path.startsWith("/api/v2") ? path : `/api/v2${path.startsWith("/") ? path : `/${path}`}`
 }
 
 function requireObject(value: unknown, context: string): Record<string, unknown> {
@@ -169,13 +172,38 @@ export class LlmWikiApiClient {
   }
 
   async health(): Promise<ApiHealth> {
-    return this.request("/health", { auth: false }) as Promise<ApiHealth>
+    // v2 health is public and returns {ok, version, commands}; auth status
+    // (authRequired/authConfigured) lives on /auth/status. Merge the two so
+    // callers that check health.mcpEnabled / health.authRequired keep working
+    // against a remote deployment (Docker) where the API is not co-located.
+    const json = await this.request("/health", { auth: false }) as Record<string, unknown>
+    // Best-effort auth status enrichment (public endpoint; never throws).
+    try {
+      const authJson = await this.request("/auth/status", { auth: false }) as Record<string, unknown>
+      return {
+        ...json,
+        authRequired: authJson.authRequired as boolean | undefined,
+        authConfigured: authJson.authConfigured as boolean | undefined,
+        allowUnauthenticated: authJson.allowUnauthenticated as boolean | undefined,
+      } as ApiHealth
+    } catch {
+      return json as ApiHealth
+    }
   }
 
   async projects(): Promise<{ projects: ApiProject[]; currentProject: ApiProject | null }> {
     const json = await this.request("/projects")
     const projects = Array.isArray(json.projects) ? json.projects.map(parseProject) : []
-    const currentProject = json.currentProject ? parseProject(json.currentProject) : null
+    // v2 has no currentProject — the shared store's lastProject is the source
+    // of truth for "current". For MCP, synthesize it as the first project
+    // (preserves the v1 contract where currentProject is used as a fallback).
+    let currentProject: ApiProject | null = null
+    if (json.currentProject) {
+      currentProject = parseProject(json.currentProject)
+    } else if (projects.length > 0) {
+      // Prefer a project marked current, otherwise first.
+      currentProject = projects.find((p) => p.current) ?? projects[0] ?? null
+    }
     return { projects, currentProject }
   }
 
@@ -234,12 +262,16 @@ export class LlmWikiApiClient {
   }
 
   async chat(projectId = "current", message: string, options: { sessionId?: string; mode?: string; topK?: number; includeContent?: boolean; wiki?: boolean; web?: boolean; anytxt?: boolean; skills?: string[]; persistSession?: boolean } = {}): Promise<ApiChatResponse> {
-    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat`, {
+    // v2 streaming chat is POST /chat → {runId, sessionId} + SSE. The MCP
+    // needs the complete answer in one response, so it uses the synchronous
+    // POST /chat/sync endpoint (issue #40) which wraps agentStartTurn and
+    // returns the full message/references/toolEvents in one body — the same
+    // shape the legacy POST /api/v1/projects/:id/chat did.
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat/sync`, {
       method: "POST",
       body: {
         message,
         sessionId: options.sessionId,
-        persistSession: options.persistSession,
         mode: options.mode,
         topK: options.topK,
         includeContent: options.includeContent,
@@ -268,7 +300,11 @@ export class LlmWikiApiClient {
   }
 
   async cancelChat(projectId = "current", sessionId: string): Promise<{ sessionId: string; cancelled: boolean }> {
-    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat/${encodeURIComponent(sessionId)}/cancel`, {
+    // v2 session-scoped cancel: POST /projects/:id/chat/session/:sid/cancel
+    // (run-scoped cancel is POST /projects/:id/chat/:runId/cancel for the
+    // browser UI). The MCP previously used the v1 session cancel
+    // POST /projects/:id/chat/:sid/cancel, so this preserves its semantics.
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/chat/session/${encodeURIComponent(sessionId)}/cancel`, {
       method: "POST",
     })
     return {
@@ -312,7 +348,7 @@ export class LlmWikiApiClient {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       })
     } catch (err) {
-      throw new Error(`LLM Wiki API request failed. Is the desktop app running? ${err instanceof Error ? err.message : String(err)}`)
+      throw new Error(`LLM Wiki API request failed. Is the LLM Wiki server running? ${err instanceof Error ? err.message : String(err)}`)
     }
 
     const text = await response.text()
@@ -323,8 +359,16 @@ export class LlmWikiApiClient {
       throw new Error(`LLM Wiki API returned non-JSON response (${response.status}): ${text.slice(0, 300)}${err instanceof Error ? ` (${err.message})` : ""}`)
     }
 
-    if (!response.ok || json.ok === false) {
-      const message = typeof json.error === "string" ? json.error : response.statusText
+    // v2 errors are {error:{code,message,details}} (ErrorEnvelopeSchema), v1
+    // errors were {ok:false, error:"string"}. Handle both so the MCP can
+    // surface the server's message regardless of API version.
+    const isErrorEnvelope = json.error && typeof json.error === "object" && !Array.isArray(json.error) && typeof (json.error as Record<string, unknown>).message === "string"
+    if (!response.ok || json.ok === false || isErrorEnvelope) {
+      let message: string
+      if (typeof json.error === "string") message = json.error
+      else if (isErrorEnvelope) message = String((json.error as Record<string, unknown>).message ?? response.statusText)
+      else if (typeof (json as Record<string, unknown>).message === "string") message = String((json as Record<string, unknown>).message)
+      else message = response.statusText
       throw new Error(`LLM Wiki API ${response.status}: ${message}`)
     }
     return json

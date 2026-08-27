@@ -114,6 +114,36 @@ export const ChatWritesResponseSchema = z.object({
   writePrompt: z.string(),
 })
 
+// ── MCP synchronous chat (issue #40: non-streaming automation client) ──────
+//
+// The streaming CHAT endpoint (POST /projects/:id/chat → {runId, sessionId})
+// is designed for the browser's SSE-driven UI. The MCP server (and other
+// automation clients) need the complete answer in a single HTTP response,
+// exactly like the legacy POST /api/v1/projects/:id/chat did.
+
+export const ChatSyncResponseSchema = z.object({
+  projectId: z.string().optional(),
+  sessionId: z.string(),
+  mode: z.string().optional(),
+  message: z.object({
+    role: z.string(),
+    content: z.string(),
+  }),
+  references: z.array(z.record(z.string(), z.unknown())),
+  toolEvents: z.array(z.object({
+    tool: z.string(),
+    status: z.string(),
+    detail: z.string().optional(),
+  })),
+  events: z.array(z.record(z.string(), z.unknown())),
+  usage: z.object({
+    promptChars: z.number().optional(),
+    completionChars: z.number().optional(),
+    referenceCount: z.number().optional(),
+    toolEventCount: z.number().optional(),
+  }).optional(),
+})
+
 export type ChatRequest = z.infer<typeof ChatRequestSchema>
 export type ChatStartResponse = z.infer<typeof ChatStartResponseSchema>
 export type ChatCancelParams = z.infer<typeof ChatCancelParamsSchema>
@@ -126,3 +156,4 @@ export type ChatCreateSessionBody = z.infer<typeof ChatCreateSessionBodySchema>
 export type ChatRenameSessionBody = z.infer<typeof ChatRenameSessionBodySchema>
 export type ChatWritesBody = z.infer<typeof ChatWritesBodySchema>
 export type ChatWritesResponse = z.infer<typeof ChatWritesResponseSchema>
+export type ChatSyncResponse = z.infer<typeof ChatSyncResponseSchema>

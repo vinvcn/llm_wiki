@@ -1,22 +1,21 @@
 # LLM Wiki MCP Server
 
-This package exposes the running LLM Wiki desktop app as a Model Context Protocol server.
+This package exposes the running LLM Wiki server as a Model Context Protocol server.
 
-It does **not** scan project folders directly and does **not** copy the app's search or graph logic. Every tool calls the local desktop API at `http://127.0.0.1:19828/api/v1`, so MCP clients use the same project registry, file permissions, search backend, graph backend, and Source Watch rules as the app.
+It does **not** scan project folders directly and does **not** copy the app's search or graph logic. Every tool calls the LLM Wiki v2 API at `http://127.0.0.1:19828/api/v2` (thin-client, issue #40) — the same API the web client uses — so MCP clients use the same project registry, file permissions, search backend, graph backend, and Source Watch rules as the server. Point `LLM_WIKI_API_BASE_URL` at a remote/Docker deployment (e.g. `https://wiki.example.com` or `http://192.168.1.10:3000`) to use the MCP against a remote backend; the legacy `http://127.0.0.1:19828/api/v1` (desktop `api_server.rs`) surface is retired with no shim.
 
 ## Requirements
 
 - Node.js 20+
-- LLM Wiki desktop app running
-- Settings → API + MCP → "Enable local HTTP API"
-- Settings → API + MCP → "Enable MCP access"
+- LLM Wiki server running (`npm start` locally, or a Docker/remote deployment — see `docs/DEPLOYMENT.md`)
 - Either:
-  - Settings → API + MCP → "Allow access without a token", or
-  - `LLM_WIKI_API_TOKEN` set to the configured API token
+  - `LLM_WIKI_AUTH_MODE=none` / `allowUnauthenticated` (open local mode), or
+  - `LLM_WIKI_API_TOKEN` set to the configured API token (token mode / shared-store `apiConfig.token`)
+- For the desktop app's `apiConfig.mcpEnabled` kill-switch, the MCP still checks `health.mcpEnabled`; when false, only `llm_wiki_status` works (other tools return a disabled error).
 
 Optional:
 
-- `LLM_WIKI_API_BASE_URL` to override the default API base URL.
+- `LLM_WIKI_API_BASE_URL` to override the default API base URL (e.g. `https://remote:3000`). The MCP is now remote-capable — no longer bound to `127.0.0.1`.
 
 ## Build
 
@@ -65,10 +64,10 @@ When API unauthenticated mode is enabled, omit `LLM_WIKI_API_TOKEN`. If MCP acce
 
 ## Security model
 
-The MCP server inherits the desktop API's security model:
+The MCP server inherits the v2 API's security model:
 
-- It only talks to `127.0.0.1` by default.
-- It uses the same API token or unauthenticated setting as Settings → API + MCP.
+- It talks to `http://127.0.0.1:19828` by default, or to the origin in `LLM_WIKI_API_BASE_URL` (e.g. a remote `https://` deployment).
+- It uses the same API token / `allowUnauthenticated` contract as `docs/DEPLOYMENT.md` (auth precedence).
 - File reads go through the API path allow-list. Internal app state files are not exposed.
 - Review data is exposed only through the dedicated Review endpoint/tool, which defaults to unresolved items rather than opening internal state files directly.
 - Search and graph tools operate on projects known to the app; use `project_id: "current"` for the active project.

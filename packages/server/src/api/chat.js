@@ -9,9 +9,9 @@ import {
   ChatRenameSessionBodySchema,
   ChatWritesBodySchema,
 } from "@llm-wiki/api-types"
-import { agentStartTurnStream, agentCancelTurn } from "../agent.js"
+import { agentStartTurnStream, agentStartTurn, agentCancelTurn } from "../agent.js"
 import * as chatStore from "../store/chat-sessions.js"
-import { getProject, getProjectByUuid, ensureProjectRow } from "../store/projects.js"
+import { getProject, getProjectByUuid, ensureProjectRow, listProjects } from "../store/projects.js"
 import { safeJoin } from "../store/project-paths.js"
 import { readStore } from "../store.js"
 import { emit } from "../events.js"
@@ -49,9 +49,23 @@ const router = Router()
 // (WikiProject.id from .llm-wiki/project.json). The web client only knows
 // the UUID, so UUID resolution falls back to the plugin-store registry —
 // the same mapping the chat agent loop already uses — and materializes the
-// projects row chat_sessions' FK requires (issue #21).
+// projects row chat_sessions' FK requires (issue #21). "current" is the
+// legacy MCP alias for the active project (lastProject / first registry /
+// first DB row) — preserved for thin-client compat (issue #40).
 function resolveChatProject(rawId) {
   const raw = String(rawId ?? "").trim()
+  if (raw === "current") {
+    const store = readStore("app-state.json")
+    if (store.lastProject?.path) {
+      return ensureProjectRow({ uuid: store.lastProject.id, path: store.lastProject.path })
+    }
+    const reg = store.projectRegistry ?? {}
+    const firstReg = Object.values(reg)[0]
+    if (firstReg?.path) return ensureProjectRow({ uuid: firstReg.id, path: firstReg.path })
+    const dbFirst = listProjects()[0]
+    if (dbFirst) return dbFirst
+    throw new ApiError(ErrorCode.PROJECT_NOT_FOUND, "No current project")
+  }
   if (/^\d+$/.test(raw)) {
     const project = getProject(Number.parseInt(raw, 10))
     if (project) return project
@@ -117,7 +131,74 @@ router.post("/:id/chat", chatProjectLookup(), validate({ body: ChatRequestSchema
   }
 })
 
-// POST /api/v2/projects/:id/chat/:runId/cancel - cancel a running turn
+// POST /api/v2/projects/:id/chat/sync - synchronous (MCP) turn.
+// Validates with the same ChatRequestSchema as the streaming route, but
+// calls agentStartTurn (blocking) and returns the complete answer in one
+// response — the wire shape the MCP client (and other automation callers)
+// previously got from POST /api/v1/projects/:id/chat. Keeps history/
+// historyExplicit etc. so MCP sessions resume via the shared-file hydrate.
+router.post("/:id/chat/sync", chatProjectLookup(), validate({ body: ChatRequestSchema }), async (req, res, next) => {
+  try {
+    const { message, sessionId, mode, tools, topK, includeContent, skills, history, historyExplicit, resume, regenerate, historyLimit } = req.validated.body
+    const request = {
+      message,
+      sessionId: sessionId || `ui_${crypto.randomUUID()}`,
+      runId: `run_${crypto.randomUUID()}`,
+      mode,
+      retrievalMode: "standard",
+      tools: tools || { wiki: true, web: false, anytxt: false },
+      topK,
+      includeContent,
+      skills,
+      history,
+      historyExplicit,
+      resume,
+      regenerate,
+      ...(historyLimit !== undefined ? { historyLimit } : {}),
+      persistSession: req.validated.body.persistSession ?? true,
+    }
+    const r = await agentStartTurn({ projectId: req.project.uuid ?? String(req.project.id), request })
+    const content = typeof r.message === "string" ? r.message : (r.message ?? "")
+    res.json({
+      projectId: String(req.project.id),
+      sessionId: r.sessionId || request.sessionId,
+      mode: r.mode || request.mode,
+      message: { role: "assistant", content },
+      references: r.references || [],
+      toolEvents: r.toolEvents || [],
+      events: r.events || [],
+      usage: {
+        referenceCount: (r.references || []).length,
+        toolEventCount: (r.toolEvents || []).length,
+      },
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === "Agent run cancelled" || /cancelled|abort/i.test(msg)) {
+      return next(new ApiError(ErrorCode.INTERNAL_ERROR, "Agent turn cancelled"))
+    }
+    next(err)
+  }
+})
+
+// POST /api/v2/projects/:id/chat/session/:sessionId/cancel - session-scoped cancel (MCP parity)
+// The v1 endpoint POST /projects/:id/chat/:sessionId/cancel cancelled every
+// active run for that session (projectId + sessionId) — see handleApiV1's
+// agentCancelTurn({projectId, sessionId}). The run-scoped
+// POST /projects/:id/chat/:runId/cancel above is the web UI's path; the MCP
+// client (and the legacy clipper's cancel tool) need the session-scoped
+// variant to stay compatible.
+router.post("/:id/chat/session/:sessionId/cancel", chatProjectLookup(), validate({ params: ChatSessionParamsSchema }), async (req, res, next) => {
+  try {
+    const { sessionId } = req.validated.params
+    const cancelled = await agentCancelTurn({ projectId: req.project.uuid ?? String(req.project.id), sessionId })
+    res.json({ sessionId, cancelled })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/v2/projects/:id/chat/:runId/cancel - cancel a running turn (run-scoped, web UI)
 router.post("/:id/chat/:runId/cancel", validate({ params: ChatCancelParamsSchema }), async (req, res, next) => {
   try {
     const { runId } = req.validated.params

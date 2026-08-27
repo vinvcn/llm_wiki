@@ -1,5 +1,10 @@
 (function initializeClipperCore(global) {
-  const DEFAULT_API_URLS = ["http://127.0.0.1:19827", "http://localhost:19827"];
+  // Thin-client migration (issue #40): the clipper now talks to the main v2
+  // API on the same origin/port as the SPA (19828 locally, 3000 in Docker,
+  // or a remote https://host). The legacy clip companion on :19827
+  // (clip-server.js / clip_server.rs, bare /clip and /projects) is retired;
+  // all clip traffic is POST /api/v2/projects/:id/clip on the main server.
+  const DEFAULT_API_URLS = ["http://127.0.0.1:19828", "http://localhost:19828"];
   const MAX_EXTRACTED_CONTENT_CHARS = 1_000_000;
   const TRUNCATION_NOTICE = "\n\n[LLM Wiki Clipper: page content truncated at 1,000,000 characters.]";
 
@@ -14,13 +19,18 @@
     if (!candidate) return DEFAULT_API_URLS[0];
     if (!/^https?:\/\//i.test(candidate)) candidate = `http://${candidate}`;
     const parsed = new URL(candidate);
-    if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+    if (!/^https?:$/i.test(parsed.protocol) || parsed.username || parsed.password) {
       throw new Error("Use an http(s) address without embedded credentials");
     }
     if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
       throw new Error("Enter only the server origin, without a path, query, or fragment");
     }
-    if (!parsed.port) parsed.port = "19827";
+    // No forced port — preserve whatever the user entered. An https:// origin
+    // without an explicit port stays port-less (443), and an http:// origin
+    // without a port keeps the browser's default (80) or the server's 19828
+    // when the user typed it explicitly. This makes remote/Docker
+    // deployments (e.g. https://wiki.example.com or http://192.168.1.10:3000)
+    // work with a single origin.
     return parsed.origin;
   }
 
@@ -182,33 +192,74 @@
   }
 
   async function loadProjects(connection) {
-    const { response, baseUrl } = await clipFetch("/projects", { method: "GET" }, connection);
+    const { response, baseUrl } = await clipFetch("/api/v2/projects", { method: "GET" }, connection);
     if (response.status === 401) throw new Error("Access token required or invalid");
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || "Failed to load projects");
-    return { projects: data.projects || [], baseUrl };
+    // v2 success: {projects: [{id, name, path, ...}]} (no ok wrapper)
+    // v2 error: {error:{code, message}} with !response.ok
+    // Legacy clip-server: {ok:true, projects:[{name, path, current}]}
+    if (!response.ok) {
+      const msg = data.error?.message || data.error || `Failed to load projects: HTTP ${response.status}`;
+      throw new Error(msg);
+    }
+    if (data.ok === false) throw new Error(data.error || "Failed to load projects");
+    const raw = Array.isArray(data.projects) ? data.projects : [];
+    // Normalize to the shape the popup/background expect: {id, name, path, current}
+    const projects = raw.map((p) => ({
+      id: String(p.id ?? p.path ?? ""),
+      name: String(p.name ?? ""),
+      path: String(p.path ?? ""),
+      current: p.current === true,
+    }));
+    // v2 has no current flag — synthesize: mark first as current if none.
+    if (projects.length && !projects.some((p) => p.current)) projects[0].current = true;
+    return { projects, baseUrl };
   }
 
   function selectProject(projects, preferredProjectPath) {
+    // preferredProjectPath is the path string stored in chrome.storage
+    // (selected via the popup's project picker). Keep path-based matching
+    // so a user who upgrades from the legacy clipper keeps their preference.
+    // Also support lookup by id for forward compat.
     return projects.find((project) => project.path === preferredProjectPath)
+      || projects.find((project) => project.id === preferredProjectPath)
       || projects.find((project) => project.current)
       || projects[0]
       || null;
   }
 
-  async function submitClip(page, projectPath, connection) {
-    const { response, baseUrl } = await clipFetch("/clip", {
+  async function submitClip(page, project, connection) {
+    // project may be a string path (legacy popup) or a full project object
+    // {id, name, path, current}. The v2 endpoint is POST
+    // /api/v2/projects/:id/clip where :id is the numeric id or UUID. The
+    // server's projectLookup accepts either, and also the filesystem path via
+    // DB fallback — so a legacy path string still works, but an object with
+    // id is preferred.
+    let projectId;
+    if (typeof project === "string") {
+      projectId = project;
+    } else if (project && typeof project === "object") {
+      projectId = project.id ?? project.path;
+    } else {
+      throw new Error("No project selected");
+    }
+    if (!projectId) throw new Error("No project selected");
+    const { response, baseUrl } = await clipFetch(`/api/v2/projects/${encodeURIComponent(projectId)}/clip`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: page.title,
         url: page.url,
         content: page.content,
-        projectPath,
       }),
     }, connection);
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `Clip failed: HTTP ${response.status}`);
+    if (!response.ok) {
+      const msg = data.error?.message || data.error || `Clip failed: HTTP ${response.status}`;
+      throw new Error(msg);
+    }
+    if (data.ok === false) throw new Error(data.error || `Clip failed: HTTP ${response.status}`);
+    // v2 returns {path, size, taskId}; legacy returned {ok:true, path}
     return { data, baseUrl };
   }
 

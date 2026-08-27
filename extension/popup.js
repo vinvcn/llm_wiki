@@ -37,17 +37,29 @@ async function clipFetch(path, options) {
 async function checkConnection() {
   let connectionError = "";
   try {
-    const res = await clipFetch("/status", { method: "GET" });
-    const data = await res.json();
-    if (res.status === 401) throw new Error("Access token required or invalid");
-    if (data.ok) {
-      statusBar.className = "status connected";
-      statusBar.textContent = "✓ Connected to LLM Wiki";
-      await loadProjects();
-      return true;
-    }
+    // Use the v2 health endpoint (public) to probe liveness, then load
+    // projects. The clip companion's bare /status is retired (issue #40).
+    const healthRes = await clipFetch("/api/v2/health", { method: "GET" });
+    if (healthRes.status === 401) throw new Error("Access token required or invalid");
+    if (!healthRes.ok) throw new Error(`Health check failed: HTTP ${healthRes.status}`);
+    // Health OK — now load projects (auth-gated; 401 surfaces as token error)
+    await loadProjects();
+    statusBar.className = "status connected";
+    statusBar.textContent = "✓ Connected to LLM Wiki";
+    return true;
   } catch (err) {
     connectionError = err?.message || "";
+    // Fallback: try legacy clip-server /status for users still on old backend
+    try {
+      const res = await clipFetch("/status", { method: "GET" });
+      const data = await res.json();
+      if (data.ok) {
+        statusBar.className = "status connected";
+        statusBar.textContent = "✓ Connected to LLM Wiki";
+        await loadProjects();
+        return true;
+      }
+    } catch {}
   }
   statusBar.className = "status disconnected";
   statusBar.textContent = connectionError.includes("token")
@@ -61,6 +73,35 @@ async function checkConnection() {
 
 async function loadProjects() {
   try {
+    // Use the clipper core's v2-aware loader so the popup and background
+    // share one project-fetch implementation (thin-client, issue #40).
+    const { projects } = await clipperCore.loadProjects({ serverUrl: apiUrl, accessToken });
+    if (projects.length > 0) {
+      const { preferredProjectPath } = await clipperCore.loadSettings();
+      projectSelect.innerHTML = "";
+      for (const proj of projects) {
+        const opt = document.createElement("option");
+        // Store the v2 id (numeric string) but keep path-based preference
+        // matching so upgrades preserve the user's choice.
+        opt.value = proj.id;
+        opt.dataset.path = proj.path;
+        opt.textContent = proj.name + (proj.current ? " (current)" : "");
+        if (proj.path === preferredProjectPath || proj.id === preferredProjectPath || (!preferredProjectPath && proj.current)) {
+          opt.selected = true;
+        }
+        projectSelect.appendChild(opt);
+      }
+      if (!projectSelect.value && projects[0]) {
+        projectSelect.value = projects[0].id;
+      }
+      // Persist the selected project's path for background's preferred lookup
+      const sel = projects.find((p) => p.id === projectSelect.value);
+      if (sel) void chrome.storage.local.set({ preferredProjectPath: sel.path });
+      return;
+    }
+  } catch {}
+  // Legacy fallback: try clip-server's GET /projects and GET /project
+  try {
     const res = await clipFetch("/projects", { method: "GET" });
     const data = await res.json();
     if (data.ok && data.projects?.length > 0) {
@@ -69,6 +110,7 @@ async function loadProjects() {
       for (const proj of data.projects) {
         const opt = document.createElement("option");
         opt.value = proj.path;
+        opt.dataset.path = proj.path;
         opt.textContent = proj.name + (proj.current ? " (current)" : "");
         if (proj.path === preferredProjectPath || (!preferredProjectPath && proj.current)) {
           opt.selected = true;
@@ -81,13 +123,12 @@ async function loadProjects() {
       return;
     }
   } catch {}
-  // Fallback to current project
   try {
     const res = await clipFetch("/project", { method: "GET" });
     const data = await res.json();
     if (data.ok && data.path) {
       const name = data.path.replace(/\\/g, "/").split("/").pop() || data.path;
-      projectSelect.innerHTML = `<option value="${data.path}">${name}</option>`;
+      projectSelect.innerHTML = `<option value="${data.path}" data-path="${data.path}">${name}</option>`;
     }
   } catch {
     projectSelect.innerHTML = '<option value="">No projects</option>';
@@ -111,30 +152,35 @@ async function extractContent() {
 }
 
 async function sendClip() {
-  const selectedProject = projectSelect.value;
-  if (!selectedProject) {
+  const selectedProjectId = projectSelect.value;
+  if (!selectedProjectId) {
     statusBar.className = "status error";
     statusBar.textContent = "✗ Please select a project";
     return;
   }
+  const selectedOption = projectSelect.options[projectSelect.selectedIndex];
+  const selectedPath = selectedOption?.dataset?.path || selectedProjectId;
 
   clipBtn.disabled = true;
   statusBar.className = "status sending";
   statusBar.textContent = "⏳ Sending to LLM Wiki...";
 
   try {
+    // submitClip is v2-aware: pass the id (and let the core resolve via
+    // projectLookup) — the stored preference stays path-based for compat.
+    const projectRef = { id: selectedProjectId, path: selectedPath };
     const result = await clipperCore.submitClip({
       title: titleInput.value,
       url: pageUrl,
       content: extractedContent,
-    }, selectedProject, {
+    }, projectRef, {
       serverUrl: apiUrl,
       accessToken,
     });
     apiUrl = result.baseUrl;
     await chrome.storage.local.set({
       serverUrl: apiUrl,
-      preferredProjectPath: selectedProject,
+      preferredProjectPath: selectedPath,
     });
     const projectName = projectSelect.options[projectSelect.selectedIndex]?.textContent || "project";
     statusBar.className = "status success";
@@ -151,7 +197,9 @@ clipBtn.addEventListener("click", sendClip);
 
 projectSelect.addEventListener("change", () => {
   if (projectSelect.value) {
-    void chrome.storage.local.set({ preferredProjectPath: projectSelect.value });
+    const opt = projectSelect.options[projectSelect.selectedIndex];
+    const p = opt?.dataset?.path || projectSelect.value;
+    void chrome.storage.local.set({ preferredProjectPath: p });
   }
 });
 

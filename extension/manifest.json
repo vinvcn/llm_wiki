@@ -5,6 +5,8 @@
   "description": "Clip web pages to your LLM Wiki knowledge base",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
+    "http://127.0.0.1:19828/*",
+    "http://localhost:19828/*",
     "http://127.0.0.1:19827/*",
     "http://localhost:19827/*"
   ],

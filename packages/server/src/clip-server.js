@@ -33,7 +33,23 @@ import fs from "node:fs"
 import path from "node:path"
 import { HOST } from "./config.js"
 import { readStore } from "./store.js"
-import { apiAuth } from "./api-v1.js"
+
+// apiAuth mirror from the former api-v1.js (desktop api_server.rs parity).
+// Kept here after the /api/v1 deletion (issue #40) so the clip companion
+// (which enforces the same token contract as the main API) stays functional
+// without pulling in the deleted v1 module.
+function apiAuth(store) {
+  const envT = (process.env.LLM_WIKI_API_TOKEN || "").trim()
+  const cfg = (store && store.apiConfig) || {}
+  const storeT = typeof cfg.token === "string" ? cfg.token.trim() : ""
+  const token = envT || storeT
+  const source = envT ? "env" : (storeT ? "store" : "none")
+  const allowUnauth = cfg.allowUnauthenticated === true
+  const enabled = cfg.enabled !== false
+  const mcpEnabled = cfg.mcpEnabled === true
+  const allowLanAccess = cfg.allowLanAccess === true
+  return { token, source, allowUnauth, authRequired: !allowUnauth, authConfigured: !!token, enabled, mcpEnabled, allowLanAccess }
+}
 
 export const CLIP_PORT = Number(process.env.LLM_WIKI_CLIP_PORT || 19827)
 const MAX_BIND_RETRIES = 3

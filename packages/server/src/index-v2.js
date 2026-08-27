@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// v2 Express + Zod server entry point (Phase 2.1 foundation).
+// v2 Express + Zod server entry point (Phase 2.1 foundation, now sole entry
+// after the thin-client migration — issue #40 retired index.js and /api/v1).
 //
-// This is a parallel implementation alongside the existing index.js. It mounts:
+// It mounts:
 //   - cors, helmet, JSON parser
 //   - auth middleware (token-based, decision #14)
 //   - /api/v2/health + /api/v2/version (public)
+//   - /api/v2/projects/* (projects, files, search, graph, reviews, clip,
+//     sources rescan, chat sync, ingest, maintenance, settings, auth)
 //   - /api/invoke/:command (legacy bridge → dispatch from invoke.js)
 //   - global error handler (normalizes to { error: { code, message, details } })
 //
-// The SQLite store, worker pool, and route groups are added in Phase 2.2+.
+// The SQLite store, worker pool, and route groups were added in Phase 2.2+.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -35,9 +38,10 @@ import eventsRouter from "./api/events.js"
 import maintenanceRouter from "./api/maintenance.js"
 import chatRouter from "./api/chat.js"
 import ingestRouter from "./api/ingest.js"
+import clipRouter from "./api/clip.js"
+import sourcesRouter from "./api/sources.js"
 import storeRouter from "./api/store.js"
 import { handleProxy } from "./proxy.js"
-import { handleApiV1 } from "./api-v1.js"
 import { exitOnBindFailure } from "./listen-guard.js"
 import { streamRawFile } from "./raw.js"
 import { startClipServer, getClipStatus, CLIP_PORT } from "./clip-server.js"
@@ -70,48 +74,6 @@ app.post("/api/proxy", (req, res, next) => {
     return next(new ApiError(ErrorCode.UNAUTHORIZED, "Authentication required"))
   }
   return handleProxy(req, res)
-})
-
-// ── desktop external REST API (/api/v1/*) ─────────────────────────────────
-// Server port of the desktop's api_server.rs (handleApiV1 in api-v1.js), so
-// the bundled MCP server and the external agent skill work against the web
-// backend unchanged. Mounted BEFORE express.json (handleApiV1 parses the raw
-// body string itself, mirroring the legacy readBody) and BEFORE the v2 auth
-// middleware — exactly like the legacy server and the desktop, where /api/v1
-// enforces its OWN auth contract (shared-store apiConfig.token or
-// LLM_WIKI_API_TOKEN via ?token= / x-llm-wiki-token / Authorization: Bearer).
-const MAX_BODY_BYTES = 64 * 1024 * 1024 // 64 MB, same cap as the legacy server
-function readRawBody(req, res, next) {
-  if (!(req.method === "POST" || req.method === "PUT" || req.method === "PATCH")) {
-    return next(null, null)
-  }
-  const chunks = []
-  let size = 0
-  req.on("data", (chunk) => {
-    size += chunk.length
-    if (size > MAX_BODY_BYTES) {
-      res.status(413).json({ error: { code: "VALIDATION_ERROR", message: "Request body too large", details: null } })
-      req.destroy()
-      return
-    }
-    chunks.push(chunk)
-  })
-  req.on("end", () => next(null, Buffer.concat(chunks).toString("utf-8")))
-  req.on("error", (err) => next(err, null))
-}
-app.all("/api/v1/*splat", (req, res, next) => {
-  readRawBody(req, res, (err, body) => {
-    if (err) return next(err)
-    const sendJson = (status, val) => res.status(status).json(val)
-    return handleApiV1({
-      method: req.method,
-      pathname: req.path,
-      searchParams: new URL(req.originalUrl, "http://localhost").searchParams,
-      headers: req.headers,
-      body,
-      sendJson,
-    })
-  })
 })
 
 app.use(express.json({ limit: "64mb", strict: false }))
@@ -239,6 +201,8 @@ app.use("/api/v2/projects/:id/graph", projectLookup(), graphRouter)
 app.use("/api/v2/projects/:id/reviews", projectLookup(), reviewsRouter)
 app.use("/api/v2/projects/:id/maintenance", projectLookup(), maintenanceRouter)
 app.use("/api/v2/projects/:id/ingest", projectLookup(), ingestRouter)
+app.use("/api/v2/projects/:id/clip", projectLookup(), clipRouter)
+app.use("/api/v2/projects/:id/sources", projectLookup(), sourcesRouter)
 app.use("/api/v2/events", eventsRouter)
 app.use("/api/v2/settings", settingsRouter)
 app.use("/api/v2/auth", authRouter)

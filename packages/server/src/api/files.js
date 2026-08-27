@@ -4,7 +4,9 @@
 // projectLookup middleware (middleware/project-lookup.js).
 
 import { Router } from "express"
+import fs from "node:fs"
 import fsp from "node:fs/promises"
+import path from "node:path"
 import { validate } from "../middleware/validate.js"
 import {
   FileTreeQuerySchema,
@@ -12,6 +14,7 @@ import {
   FileUploadBodySchema,
   FileDownloadQuerySchema,
   FileRawQuerySchema,
+  FileListQuerySchema,
   ChunkedUploadInitBodySchema,
   ChunkedUploadChunkQuerySchema,
 } from "@llm-wiki/api-types"
@@ -43,6 +46,63 @@ function mapFsError(err) {
   }
   return err
 }
+
+// ── MCP file listing (issue #40: replaces /api/v1 files) ────────────────────
+// The MCP previously listed files via GET /api/v1/projects/:id/files?root=
+// (public-path guard + truncation). The SPA's tree view stays on GET /tree;
+// this endpoint preserves the MCP shape (root/sources/all, project-relative
+// paths, truncation) under v2 so the MCP can be a native v2 client.
+const fwd = (p) => p.split(path.sep).join("/")
+function walkPublic(dir, relBase, recursive, counter, maxFiles, truncated) {
+  let entries
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return [] }
+  const out = []
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue
+    if (counter.n >= maxFiles) { truncated.v = true; break }
+    const full = path.join(dir, e.name)
+    const rel = relBase ? `${relBase}/${e.name}` : e.name
+    const isDir = e.isDirectory()
+    const node = { name: e.name, path: fwd(rel), isDir }
+    if (isDir) {
+      if (recursive) node.children = walkPublic(full, rel, true, counter, maxFiles, truncated)
+      else node.children = []
+    } else {
+      counter.n++
+    }
+    out.push(node)
+  }
+  return out
+}
+function listFiles(projectPath, root, recursive, maxFiles) {
+  const roots = root === "sources" ? ["raw/sources"] : root === "all" ? ["wiki", "raw/sources"] : ["wiki"]
+  const counter = { n: 0 }
+  const truncated = { v: false }
+  const files = []
+  for (const r of roots) {
+    const abs = path.join(projectPath, r)
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) continue
+    if (recursive) {
+      const kids = walkPublic(abs, r, true, counter, maxFiles, truncated)
+      files.push({ name: path.basename(r === "raw/sources" ? "sources" : r), path: fwd(r), isDir: true, children: kids })
+    } else {
+      files.push(...walkPublic(abs, r, false, counter, maxFiles, truncated))
+    }
+    if (truncated.v) break
+  }
+  return { files, truncated: truncated.v }
+}
+
+// GET /api/v2/projects/:id/files?root=&recursive=&maxFiles=
+router.get("/", validate({ query: FileListQuerySchema }), async (req, res, next) => {
+  try {
+    const { root, recursive, maxFiles } = req.validated.query
+    const { files, truncated } = listFiles(req.projectRoot, root, recursive, maxFiles)
+    res.json({ files, truncated })
+  } catch (err) {
+    next(err)
+  }
+})
 
 // GET /api/v2/projects/:id/files/tree?path=&includeHidden=&maxDepth=
 router.get("/tree", validate({ query: FileTreeQuerySchema }), async (req, res, next) => {
