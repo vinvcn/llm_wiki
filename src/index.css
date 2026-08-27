@@ -145,16 +145,21 @@
   #root {
     height: 100%;
     }
+  html {
+    @apply font-sans;
+    overflow-x: hidden;
+    }
   body {
     @apply bg-background text-foreground;
+    overflow-x: hidden;
+    max-width: 100vw;
     }
   #root {
     box-sizing: border-box;
     height: 100vh;
     background: var(--background);
-    }
-  html {
-    @apply font-sans;
+    overflow-x: hidden;
+    max-width: 100vw;
     }
 }
 

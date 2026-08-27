@@ -2,8 +2,10 @@ import { useRef, useEffect, useCallback, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
-import { BookOpen, Plus, Trash2, Pencil, Check, MessageSquare, X, Maximize2, FolderOpen, FileText } from "lucide-react"
+import { BookOpen, Plus, Trash2, Pencil, Check, MessageSquare, X, Maximize2, FolderOpen, FileText, PanelLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { useIsMobile } from "@/hooks/use-is-mobile"
+import { MobileSheet } from "@/components/layout/mobile/mobile-sheet"
 import { ChatMessage, StreamingMessage, useSourceFiles, type ChatReferencePreview } from "./chat-message"
 import { ChatInput, type ChatSendOptions } from "./chat-input"
 import { useChatStore, chatMessagesToLLM, type MessageImage, type MessageReference } from "@/stores/chat-store"
@@ -201,7 +203,7 @@ function ConversationSidebar({
   }
 
   return (
-    <div className="flex h-full w-[200px] flex-shrink-0 flex-col border-r bg-muted/30">
+    <div className="flex h-full w-full flex-shrink-0 flex-col border-r bg-muted/30 md:w-[200px]">
       <div className="border-b p-2">
         <Button
           variant="outline"
@@ -586,6 +588,8 @@ export function ChatPanel() {
   const [availableSkills, setAvailableSkills] = useState<AvailableAgentSkill[]>([])
   const [approvingShellMessageId, setApprovingShellMessageId] = useState<string | null>(null)
   const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null)
+  const isMobile = useIsMobile()
+  const [showMobileConversations, setShowMobileConversations] = useState(false)
   const buildGeneratedOutputPreview = useCallback(async (ref: MessageReference): Promise<ChatReferencePreview | null> => {
     if (!project) return null
     const outputPath = projectAbsolutePath(project.path, ref.path)
@@ -1751,14 +1755,38 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full flex-row overflow-hidden">
-      <ConversationSidebar
-        onNewConversation={handleNewConversation}
-        onSelectConversation={handleSelectConversation}
-        onRenameConversation={handleRenameConversation}
-        onDeleteConversation={handleDeleteConversation}
-      />
+      <div className="hidden md:flex">
+        <ConversationSidebar
+          onNewConversation={handleNewConversation}
+          onSelectConversation={handleSelectConversation}
+          onRenameConversation={handleRenameConversation}
+          onDeleteConversation={handleDeleteConversation}
+        />
+      </div>
+
+      <MobileSheet open={showMobileConversations} onClose={() => setShowMobileConversations(false)} title={t("chat.newConversation", "Conversations")}>
+        <ConversationSidebar
+          onNewConversation={() => { handleNewConversation(); setShowMobileConversations(false) }}
+          onSelectConversation={(id) => { handleSelectConversation(id); setShowMobileConversations(false) }}
+          onRenameConversation={handleRenameConversation}
+          onDeleteConversation={handleDeleteConversation}
+        />
+      </MobileSheet>
 
       <div className="flex flex-1 flex-col overflow-hidden">
+        {isMobile && (
+          <div className="flex shrink-0 items-center gap-2 border-b px-2 py-1.5">
+            <button
+              type="button"
+              onClick={() => setShowMobileConversations(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border bg-background px-2.5 py-1.5 text-xs hover:bg-accent"
+              data-testid="chat-open-conversations"
+            >
+              <PanelLeft className="h-3.5 w-3.5" />
+              {t("chat.newChat", "Conversations")}
+            </button>
+          </div>
+        )}
         {!activeConversationId ? (
           <div className="flex flex-1 items-center justify-center text-muted-foreground">
             <div className="text-center">
@@ -1843,7 +1871,7 @@ export function ChatPanel() {
         />
       </div>
 
-      {referencePreview && (
+      {!isMobile && referencePreview && (
         <ChatReferencePreviewPanel
           preview={referencePreview}
           width={referencePreviewWidth}
@@ -1851,7 +1879,7 @@ export function ChatPanel() {
           onClose={() => setReferencePreview(null)}
         />
       )}
-      {generatedOutputPreviews.length > 0 && (
+      {!isMobile && generatedOutputPreviews.length > 0 && (
         <GeneratedOutputsPanel
           outputs={generatedOutputPreviews}
           onOpen={openGeneratedOutputModal}

@@ -323,7 +323,7 @@ export function DropZone({ projectId, onUploadComplete, className }: DropZonePro
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         className={cn(
-          "group relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center outline-none transition-all duration-200",
+          "group relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-8 text-center outline-none transition-all duration-200 md:px-6 md:py-10",
           "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
           dragActive
             ? "border-primary bg-primary/10 ring-3 ring-primary/30"
