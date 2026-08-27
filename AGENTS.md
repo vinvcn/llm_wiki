@@ -23,6 +23,14 @@ Follow the outline and writing rules defined in that index:
 Acceptance findings must not live only in chat threads or PR comments — the
 index and report files are the durable, traceable record.
 
+## Mobile is a first-class UI
+
+Phone web is not an afterthought — it is a primary surface alongside desktop. Every change that touches a shared UI surface must keep both shells green:
+
+- **Hard switch:** `<768px` → mobile shell (bottom tab bar with 4–5 destinations + full-screen sheets); `≥768px` → desktop 3-pane (`48px` icon rail + `220px` left + center + `400px` right, draggable). One breakpoint, no in-between.
+- **Definition of done:** all primary flows completable at `390×844` (browse/read, search, chat turn, edit via simple textarea+preview, upload+ingest, graph) with **no horizontal scroll at `360px`** and no unreachable controls. Desktop `≥768px` must stay pixel-unchanged.
+- **Build rule:** shared components are responsive by default (`md:` guard, `useIsMobile(768)` only for shell switches). Desktop-only additions that break `360` fail review. Verify with Playwright at `390`, `360`, and `1280` (or `npm run build:web` + manual check) before marking a UI PR ready.
+
 ## Repository facts (short version)
 
 - npm-workspaces monorepo; server = plain-JS ESM (`packages/server`, entry
