@@ -12,6 +12,8 @@ import { ErrorBoundary } from "@/components/error-boundary"
 import { getAppLayoutVisibility } from "./app-layout-visibility"
 import { PanelLeftOpen } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { useIsMobile } from "@/hooks/use-is-mobile"
+import { MobileShell } from "./mobile/mobile-shell"
 
 const LEFT_PANEL_COLLAPSED_KEY = "llm-wiki:left-panel-collapsed"
 
@@ -24,6 +26,7 @@ export function AppLayout({ onSwitchProject }: AppLayoutProps) {
   const project = useWikiStore((s) => s.project)
   const activeView = useWikiStore((s) => s.activeView)
   const researchPanelOpen = useResearchStore((s) => s.panelOpen)
+  const isMobile = useIsMobile()
   const [leftWidth, setLeftWidth] = useState(220)
   const [rightWidth, setRightWidth] = useState(400)
   const [leftCollapsed, setLeftCollapsed] = useState(
@@ -96,6 +99,10 @@ export function AppLayout({ onSwitchProject }: AppLayoutProps) {
       localStorage.setItem(LEFT_PANEL_COLLAPSED_KEY, String(next))
       return next
     })
+  }
+
+  if (isMobile) {
+    return <MobileShell onSwitchProject={onSwitchProject} />
   }
 
   return (

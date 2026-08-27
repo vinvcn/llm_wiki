@@ -372,7 +372,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
       </div>
 
       {mode === "read" ? (
-        <div ref={readerRef} className="h-full overflow-auto px-6 py-6" onMouseUp={captureRenderedSelection}>
+        <div ref={readerRef} className="h-full overflow-auto px-4 py-4 md:px-6 md:py-6" onMouseUp={captureRenderedSelection}>
           {frontmatter && <StableFrontmatterPanel data={frontmatter} />}
           <StableWikiReader
             body={body}
@@ -382,7 +382,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
           />
         </div>
       ) : (
-        <div className="h-full overflow-auto p-6">
+        <div className="h-full overflow-auto p-4 md:p-6">
           <textarea
             aria-label={t("editor.rawMarkdownEditor")}
             value={draftMarkdown}
@@ -407,7 +407,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
       {showPageLinks && filePath && <PageLinksPanel filePath={filePath} onClose={() => setShowPageLinks(false)} />}
       </div>
       {selectionRequest && (
-        <aside className="flex h-full w-[360px] max-w-[45%] shrink-0 flex-col border-l border-border bg-background" aria-label={t("editor.selection.askAgent")}>
+        <aside className="flex h-full w-full shrink-0 flex-col border-l border-border bg-background max-md:fixed max-md:inset-0 max-md:z-40 max-md:w-full max-md:max-w-none md:w-[360px] md:max-w-[45%]" aria-label={t("editor.selection.askAgent")}>
           <header className="flex min-h-11 items-center gap-2 border-b border-border px-3 py-2">
             <Sparkles className="h-4 w-4 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate text-sm font-medium">{t("editor.selection.askAgent")}</span>
