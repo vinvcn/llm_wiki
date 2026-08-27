@@ -20,6 +20,13 @@ import {
   ChatSessionParamsSchema,
   ChatCreateSessionBodySchema,
   ChatRenameSessionBodySchema,
+  ChatRequestSchema,
+  ChatSyncResponseSchema,
+  ClipRequestSchema,
+  ClipResponseSchema,
+  RescanResponseSchema,
+  FileListQuerySchema,
+  FileListResponseSchema,
   ChunkedUploadInitBodySchema,
   ChunkedUploadInitResponseSchema,
   ChunkedUploadChunkQuerySchema,
@@ -40,6 +47,23 @@ const ChunkedUploadInitRef = registry.register("ChunkedUploadInit", ChunkedUploa
 const ChunkedUploadInitResponseRef = registry.register("ChunkedUploadInitResponse", ChunkedUploadInitResponseSchema)
 const ChunkedUploadChunkResponseRef = registry.register("ChunkedUploadChunkResponse", ChunkedUploadChunkResponseSchema)
 const ChunkedUploadCompleteResponseRef = registry.register("ChunkedUploadCompleteResponse", ChunkedUploadCompleteResponseSchema)
+registry.register("ClipRequest", ClipRequestSchema)
+registry.register("ClipResponse", ClipResponseSchema)
+registry.register("ChatSyncResponse", ChatSyncResponseSchema)
+registry.register("RescanResponse", RescanResponseSchema)
+// FileListResponse contains a recursive FileNodeSchema (children → FileNode)
+// which triggers a stack overflow in zod-to-openapi's lazy handling. Register
+// a shallow version for the OpenAPI document — the runtime validation still
+// uses the full recursive Zod schema.
+registry.register("FileListResponse", z.object({
+  files: z.array(z.object({
+    name: z.string(),
+    path: z.string(),
+    isDir: z.boolean(),
+    children: z.array(z.unknown()).optional(),
+  })),
+  truncated: z.boolean(),
+}))
 
 // ── register paths ────────────────────────────────────────────────────────
 registry.registerPath({
@@ -265,6 +289,83 @@ registry.registerPath({
     404: {
       description: "Project or upload session not found, expired, or other project",
     },
+  },
+})
+
+// ── clipper + MCP v2 surfaces (issue #40) ────────────────────────────────
+registry.registerPath({
+  method: "post",
+  path: "/api/v2/projects/{id}/clip",
+  summary: "Clip a web page (browser extension, thin-client)",
+  request: {
+    params: chatProjectIdParam,
+    body: { content: { "application/json": { schema: ClipRequestSchema } } },
+  },
+  responses: {
+    201: {
+      description: "Clipped page written + ingest enqueued",
+      content: { "application/json": { schema: ClipResponseSchema } },
+    },
+    400: { description: "Validation error" },
+    404: { description: "Project not found" },
+  },
+})
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v2/projects/{id}/sources/rescan",
+  summary: "Rescan source folders (MCP rescan, thin-client)",
+  request: { params: chatProjectIdParam },
+  responses: {
+    200: {
+      description: "Rescan enqueued",
+      content: { "application/json": { schema: RescanResponseSchema } },
+    },
+    404: { description: "Project not found" },
+  },
+})
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v2/projects/{id}/files",
+  summary: "MCP-friendly file listing (root/sources/all, thin-client)",
+  request: { params: chatProjectIdParam, query: FileListQuerySchema },
+  responses: {
+    200: {
+      description: "File tree (project-relative paths)",
+      content: {
+        "application/json": {
+          schema: z.object({
+            files: z.array(z.object({
+              name: z.string(),
+              path: z.string(),
+              isDir: z.boolean(),
+              children: z.array(z.unknown()).optional(),
+            })),
+            truncated: z.boolean(),
+          }),
+        },
+      },
+    },
+    404: { description: "Project not found" },
+  },
+})
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v2/projects/{id}/chat/sync",
+  summary: "Synchronous chat turn (MCP, thin-client)",
+  request: {
+    params: chatProjectIdParam,
+    body: { content: { "application/json": { schema: ChatRequestSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Complete answer (message + references + toolEvents)",
+      content: { "application/json": { schema: ChatSyncResponseSchema } },
+    },
+    400: { description: "Validation error" },
+    404: { description: "Project not found" },
   },
 })
 

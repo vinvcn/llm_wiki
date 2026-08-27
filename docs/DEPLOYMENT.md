@@ -17,26 +17,27 @@ app, so both clients can share one knowledge base.
 - `19828` — default HTTP port for both server entries (SPA + API)
 - `1421` — Vite dev server (`npm run dev:web` only; proxies `/api` to the backend)
 
-**Two server entry points**
+**Server entry point (sole — issue #40 retired the legacy entry)**
 
 | Entry | Command | Serves | API surface |
 |---|---|---|---|
-| `packages/server/src/index-v2.js` | `node packages/server/src/index-v2.js` (or `npm run start:web`, which builds the SPA first) | SPA + v2 API + legacy bridge (single process) | `/api/v2/*` incl. `/api/v2/openapi.json`, plus `/api/invoke/*`, `/api/store/*`, `/api/events`, `/api/home` |
-| `packages/server/src/index.js` | `npm run server` | SPA + legacy API | `/api/invoke/*`, `/api/store/*`, `/api/events`, `/api/raw`, `/api/proxy`, `/api/v1/*` |
+| `packages/server/src/index-v2.js` | `node packages/server/src/index-v2.js` (or `npm start`, which builds the SPA first) | SPA + v2 API + legacy-compat bridge (single process) | `/api/v2/*` incl. `/api/v2/openapi.json` + `/api/v2/projects/:id/clip` (browser clipper) + `POST /api/v2/projects/:id/chat/sync` (MCP) + `/api/invoke/*`, `/api/store/*`, `/api/events`, `/api/health`, `/api/raw` |
 
-The **v2 entry is the primary server**: it serves the SPA, the `/api/v2/*`
-REST API, the SSE stream, and the legacy `/api/invoke/*` bridge in one
-process — and it is the only entry that starts the server-driven ingest
-orchestrator. The web client talks to `/api/v2/*` for auth, projects, files,
-search, graph, chat writes, chat sessions, ingest, reviews, settings, and SSE
-events, and to the legacy bridge for commands and store access; chat turn
-start/cancel currently also goes over the bridge
-(`POST /api/invoke/agent_start_turn_stream` /
-`POST /api/invoke/agent_cancel_turn`). Run the legacy `index.js` entry alone
-only if you deliberately want the pre-v2 surface: it has no `/api/v2/*`
-routes and no ingest orchestrator, so ingest enqueued from the web client
-never runs against it. See [API_REFERENCE.md](./API_REFERENCE.md) for the
-endpoint inventory.
+The sole entry serves the SPA, the `/api/v2/*` REST API (including the
+clip and MCP sync-chat surfaces), the SSE stream, and the legacy
+`/api/invoke/*` + `/api/store/*` bridge in one process — and it alone starts the
+server-driven ingest orchestrator. The web client talks to `/api/v2/*` for
+auth, projects, files, search, graph, chat (streaming), chat writes, chat
+sessions, ingest, reviews, settings, clip, and SSE events, and to the legacy
+bridge for a few remaining commands/store access. The MCP server and browser
+clipper now speak `/api/v2` directly (remote/Docker-capable, single origin,
+`LLM_WIKI_API_BASE_URL` may be `https://remote:3000`). See
+[API_REFERENCE.md](./API_REFERENCE.md) for the endpoint inventory.
+
+> **Retired in issue #40 (2026-08-27):** the legacy raw-`node:http` entry
+> (`packages/server/src/index.js`, `npm run server`) and the entire
+> `/api/v1/*` surface were deleted. Docker's `CMD` has always been
+> `index-v2.js`; local `npm start` now also runs it.
 
 ---
 

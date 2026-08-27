@@ -37,7 +37,7 @@ async function clipCurrentPage(commandTab) {
     if (!project) throw new Error("No LLM Wiki project is available");
 
     const page = await core.extractActiveTab(commandTab);
-    const submitted = await core.submitClip(page, project.path, connection);
+    const submitted = await core.submitClip(page, project, connection);
     await chrome.storage.local.set({
       serverUrl: submitted.baseUrl,
     });

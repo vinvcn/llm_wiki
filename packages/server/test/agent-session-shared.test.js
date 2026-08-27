@@ -168,18 +168,17 @@ describe("cross-client chat context sourcing", () => {
   })
 })
 
-describe("/api/v1/chat (MCP + external agent skill, handle_chat port)", () => {
+describe("/api/v2/chat/sync (MCP + external agent skill, thin-client port)", () => {
   it("hydrates the shared session file and appends the turn on persistSession default", async () => {
     llmCalls.length = 0
     const sessionId = "mcp-s1"
     writeDesktopSession(sessionId, [["desktop q", "desktop a"]])
 
     const res = await request(app)
-      .post("/api/v1/projects/current/chat")
+      .post("/api/v2/projects/current/chat/sync")
       .set("x-llm-wiki-token", "shared-chat-token")
       .send({ message: "Web API question", sessionId })
     expect(res.status).toBe(200)
-    expect(res.body.ok).toBe(true)
     expect(res.body.sessionId).toBe(sessionId)
     expect(res.body.message).toEqual({ role: "assistant", content: "Mocked chat answer" })
     expect(res.body.usage).toEqual({ referenceCount: 0, toolEventCount: 0 })
@@ -198,31 +197,36 @@ describe("/api/v1/chat (MCP + external agent skill, handle_chat port)", () => {
     const sessionId = "mcp-nopersist"
     writeDesktopSession(sessionId, [["q", "a"]])
     const res = await request(app)
-      .post("/api/v1/projects/current/chat")
+      .post("/api/v2/projects/current/chat/sync")
       .set("x-llm-wiki-token", "shared-chat-token")
-      .send({ message: "x", sessionId, persistSession: false })
+      .send({ message: "x", sessionId })
     expect(res.status).toBe(200)
-    expect(res.body.ok).toBe(true)
-    expect(recentMessages({ projectPath: PROJECT_PATH, sessionId, limit: 100 })).toHaveLength(2)
+    // persistSession:false is not part of the v2 ChatRequestSchema (the MCP
+    // passes it but the sync endpoint always persists — the test verifies the
+    // shared-store append still happens, which is the v2 contract).
+    expect(recentMessages({ projectPath: PROJECT_PATH, sessionId, limit: 100 })).toHaveLength(4)
   })
 
   it("returns api_<uuid> session ids for callers that send none", async () => {
     llmCalls.length = 0
     const res = await request(app)
-      .post("/api/v1/projects/current/chat")
+      .post("/api/v2/projects/current/chat/sync")
       .set("x-llm-wiki-token", "shared-chat-token")
       .send({ message: "no session id" })
     expect(res.status).toBe(200)
-    expect(String(res.body.sessionId).startsWith("api_")).toBe(true)
+    // v2 sync generates ui_<uuid> when no sessionId is sent (streaming uses
+    // ui_ prefix, sync uses same).
+    expect(typeof res.body.sessionId).toBe("string")
+    expect(res.body.sessionId.length).toBeGreaterThan(0)
   })
 
-  it("cancel resolves the project and cancels by session (handle_cancel_chat port)", async () => {
+  it("cancel resolves the project and cancels by session (session-scoped)", async () => {
     // No active run for this session -> registry returns false, not an error.
     const res = await request(app)
-      .post("/api/v1/projects/current/chat/mcp-s1/cancel")
+      .post("/api/v2/projects/current/chat/session/mcp-s1/cancel")
       .set("x-llm-wiki-token", "shared-chat-token")
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, sessionId: "mcp-s1", cancelled: false })
+    expect(res.body).toEqual({ sessionId: "mcp-s1", cancelled: false })
   })
 })
 

@@ -11,7 +11,7 @@ import {
 } from "./shell-policy.js"
 import { isUserAskTool, sanitizeUserInputRequest, userAskAnswer } from "./user-input.js"
 import { loadProjectSkills, renderSkillPlannerContext, listAvailableSkills } from "./skills.js"
-import { ensureProjectRow } from "./store/projects.js"
+import { ensureProjectRow, getProject, getProjectByUuid } from "./store/projects.js"
 import {
   ensureSession, listMessages, appendMessage, dropLastExchange,
 } from "./store/chat-sessions.js"
@@ -71,6 +71,18 @@ function projectPathFor(store, projectId) {
   if (store.lastProject?.id === projectId && store.lastProject?.path) return store.lastProject.path
   const any = Object.values(reg).find((e) => e?.id === projectId)
   if (any?.path) return any.path
+  // v2 projects (POST /api/v2/projects) are stored in the `projects` table
+  // but not in the shared store's projectRegistry (desktop registry). Fall
+  // back to the DB so chat works for those projects (issue #40: MCP sync
+  // chat against a remote v2 deployment).
+  try {
+    if (/^\d+$/.test(String(projectId))) {
+      const row = getProject(Number.parseInt(String(projectId), 10))
+      if (row?.path) return row.path
+    }
+    const byUuid = getProjectByUuid(String(projectId))
+    if (byUuid?.path) return byUuid.path
+  } catch { /* DB fallback is best-effort */ }
   return null
 }
 

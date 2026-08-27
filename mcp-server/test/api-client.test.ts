@@ -25,23 +25,29 @@ test("projects sends bearer token and parses current project", async () => {
   })
   const result = await client.projects()
 
-  assert.equal(calls[0]?.url, "http://localhost:19828/api/v1/projects")
+  assert.equal(calls[0]?.url, "http://localhost:19828/api/v2/projects")
   assert.equal((calls[0]?.init?.headers as Record<string, string>).Authorization, "Bearer secret")
   assert.equal(result.currentProject?.id, "p1")
   assert.equal(result.projects[0]?.current, true)
 })
 
 test("health does not send authorization", async () => {
-  const calls: Array<RequestInit | undefined> = []
-  const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    calls.push(init)
+  const calls: Array<{ url: string; init?: RequestInit }> = []
+  const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = String(url)
+    calls.push({ url: u, init })
+    if (u.includes("/auth/status")) {
+      return new Response(JSON.stringify({ authRequired: false, authConfigured: false, allowUnauthenticated: true }), { status: 200 })
+    }
     return new Response(JSON.stringify({ ok: true, status: "running" }), { status: 200 })
   }
 
   const client = new LlmWikiApiClient({ token: "secret", fetchImpl })
   await client.health()
 
-  assert.equal((calls[0]?.headers as Record<string, string> | undefined)?.Authorization, undefined)
+  // health() fetches /health (public, no auth) and best-effort /auth/status
+  assert.equal((calls[0]?.init?.headers as Record<string, string> | undefined)?.Authorization, undefined)
+  assert.ok(calls[0]?.url.includes("/api/v2/health"))
 })
 
 test("search posts JSON body to current project", async () => {
@@ -98,7 +104,7 @@ test("chat posts agent request and parses references", async () => {
     skills: ["reviewer"],
   })
 
-  assert.equal(url, "http://localhost:19828/api/v1/projects/current/chat")
+  assert.equal(url, "http://localhost:19828/api/v2/projects/current/chat/sync")
   assert.deepEqual(JSON.parse(body), {
     message: "question",
     sessionId: "s1",
@@ -132,7 +138,7 @@ test("cancelChat posts to the chat cancellation endpoint", async () => {
   const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
   const response = await client.cancelChat("current", "s1")
 
-  assert.equal(url, "http://localhost:19828/api/v1/projects/current/chat/s1/cancel")
+  assert.equal(url, "http://localhost:19828/api/v2/projects/current/chat/session/s1/cancel")
   assert.equal(method, "POST")
   assert.deepEqual(response, { sessionId: "s1", cancelled: true })
 })
@@ -198,20 +204,20 @@ test("reviews requests unresolved review items with filters", async () => {
     limit: 5,
   })
 
-  assert.equal(calls[0], "http://localhost:19828/api/v1/projects/current/reviews?status=unresolved&type=missing-page&limit=5")
+  assert.equal(calls[0], "http://localhost:19828/api/v2/projects/current/reviews?status=unresolved&type=missing-page&limit=5")
   assert.equal(result.status, "unresolved")
   assert.equal(result.count, 1)
   assert.equal(result.reviews[0]?.id, "r1")
   assert.equal(result.reviews[0]?.resolved, false)
 })
 
-test("network failures include desktop app hint", async () => {
+test("network failures include server hint", async () => {
   const fetchImpl = async (): Promise<Response> => {
     throw new Error("ECONNREFUSED")
   }
 
   const client = new LlmWikiApiClient({ fetchImpl })
-  await assert.rejects(() => client.projects(), /Is the desktop app running\? ECONNREFUSED/)
+  await assert.rejects(() => client.projects(), /Is the LLM Wiki server running\? ECONNREFUSED/)
 })
 
 test("non-JSON responses include status and body preview", async () => {

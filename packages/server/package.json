@@ -5,17 +5,17 @@
   "description": "Backend server for LLM Wiki (browser client + server architecture). Serves the built web client and exposes the Tauri command surface over HTTP/SSE.",
   "type": "module",
   "bin": {
-    "llm-wiki-server": "src/index.js"
+    "llm-wiki-server": "src/index-v2.js"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
+    "start": "node src/index-v2.js",
+    "dev": "node --watch src/index-v2.js",
     "start:v2": "node src/index-v2.js",
     "dev:v2": "node --watch src/index-v2.js",
     "build:api-types": "npm --prefix ../api-types run build",
     "pretest": "npm run build:api-types",
-    "predev:v2": "npm run build:api-types",
-    "prestart:v2": "npm run build:api-types",
+    "predev": "npm run build:api-types",
+    "prestart": "npm run build:api-types",
     "test": "vitest run --config vitest.config.js"
   },
   "engines": {

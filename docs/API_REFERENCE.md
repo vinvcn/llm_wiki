@@ -269,14 +269,35 @@ and skipped for runs the receiving tab started itself.
 
 ---
 
-## Legacy bridge (deprecated)
+### Clip (browser clipper — issue #40, thin-client)
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/invoke/:command` | Invokes a command from the desktop (Tauri) command registry. **Deprecated** (RFC 8594): responses carry `Deprecation: true` and a `Link` to `/api/v2/openapi.json`. Returns `{ ok, result }`. The web client uses this during migration; new integrations should use `/api/v2/*`. |
+| POST | `/api/v2/projects/:id/clip` | Clip a web page (browser extension). Body `{ "title", "url", "content" }` (all strings, content is the extracted markdown) → `201 { "path": "raw/sources/<slug>-<date>.md", "size": 1234, "taskId": 1 }`. Writes `raw/sources/<slug>-<date>.md` (frontmatter `type: clip`, `origin: web-clip`) and enqueues ingest (`ingest:queued` + `file:created`); the file is project-relative. `projectId` accepts the numeric projects-table id, the WikiProject UUID, or the project path. Auth-gated like any other project route. |
 
-The legacy (v1) server entry (`packages/server/src/index.js`, `npm run server`)
-additionally serves the endpoints the current web client depends on:
+### Sources
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v2/projects/:id/sources/rescan` | Rescan the project's source folders (MCP `rescan`). Triggers the file-sync watcher to diff the project against its snapshot and enqueue changed sources. → `{ "changed": 0, "queueVersion": 1 }`. |
+
+### Files — MCP listing (issue #40)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v2/projects/:id/files?root=&recursive=&maxFiles=` | MCP-friendly file listing (thin-client). Query `root` (`wiki` / `sources` / `all`, default `wiki`), `recursive` (bool, default `true`), `maxFiles` (1–50000, default 5000) → `{ "files": [{ "name", "path", "isDir", "children"? }], "truncated": false }`. Paths are project-relative (`wiki/...`, `raw/sources/...`). Replaces the legacy `GET /api/v1/projects/:id/files` surface. |
+
+### Chat — synchronous (MCP — issue #40)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v2/projects/:id/chat/sync` | **Synchronous** chat turn for automation (MCP). Body is the same `ChatRequest` as `POST /chat` (`message`, `sessionId`?, `mode`?, `tools`?, `topK`?, `skills`?…) → immediate `{ "projectId", "sessionId", "mode", "message": { "role", "content" }, "references": [...], "toolEvents": [...], "events": [...], "usage": {...} }`. No SSE; the answer is in the response body. `sessionId` defaults to `ui_<uuid>` like the streaming route. |
+| POST | `/api/v2/projects/:id/chat/session/:sessionId/cancel` | Cancel a running chat turn by session (MCP). The web UI's run-scoped cancel is `POST /api/v2/projects/:id/chat/:runId/cancel`; this session-scoped variant mirrors the legacy `POST /api/v1/projects/:id/chat/:sid/cancel` (all active runs for the session). → `{ "sessionId", "cancelled": true }`. |
+
+## Legacy compat (still served by the sole entry `index-v2.js`)
+
+The sole server entry (`packages/server/src/index-v2.js`, `npm start`) additionally
+serves the endpoints the web client still depends on during the v2 migration:
 
 | Method | Path | Description |
 |---|---|---|
@@ -285,10 +306,15 @@ additionally serves the endpoints the current web client depends on:
 | GET | `/api/home` | Server home dir / cwd / platform (for the folder picker). |
 | GET | `/api/events` | Legacy SSE stream (same bus as `/api/v2/events`). |
 | GET | `/api/raw?path=` | Stream a server-side file by absolute path. |
-| POST | `/api/invoke/:command` | Command dispatch (JSON args body). |
+| POST | `/api/invoke/:command` | Command dispatch (JSON args body). **Deprecated** (RFC 8594): responses carry `Deprecation: true` and a `Link` to `/api/v2/openapi.json`. New integrations should use `/api/v2/*`. |
 | GET/PUT/DELETE | `/api/store/:name[/:key]` | Read/write/delete plugin-store JSON. |
 | POST | `/api/proxy` | Outbound HTTP proxy for provider calls. |
-| * | `/api/v1/*` | Desktop-API surface for the bundled MCP server / external agent skill. Enforces `api_server.rs` semantics: `/api/v1/health` is public even when the API is disabled; `apiConfig.enabled=false` (shared store) 503s every other endpoint with `API server is disabled in Settings → API Server` before auth; agent chat (`POST /projects/:id/chat` + `/chat/:sid/cancel`) always requires a real token (`Bearer` / `?token=` / `x-llm-wiki-token`) even in unauthenticated mode; only GET/POST/PATCH are accepted (405 otherwise). |
+
+> **Retired in issue #40 (2026-08-27):** the legacy raw-`node:http` entry
+> (`packages/server/src/index.js`, `npm run server`) and the entire
+> `/api/v1/*` surface (desktop `api_server.rs` parity — `handleApiV1` in
+> `api-v1.js`) were deleted. The MCP server and browser clipper now speak
+> `/api/v2` directly (single origin, remote/Docker-capable); no v1 shim remains.
 
 ---
 

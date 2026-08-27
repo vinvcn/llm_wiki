@@ -131,85 +131,28 @@ describe("GET /api/health + /api/commands (legacy diagnostics)", () => {
   })
 })
 
-// ── /api/v1 (desktop external API: MCP server / agent skill) ─────────────
-describe("/api/v1 desktop external API", () => {
-  it("registers a desktop-shaped project via the shared store", async () => {
-    const res = await request(app)
-      .put("/api/store/app-state.json")
-      .send({
-        projectRegistry: { [projectId]: { id: projectId, name: "Legacy Proj", path: PROJECT_DIR } },
-        lastProject: { id: projectId, path: PROJECT_DIR },
-      })
-    expect(res.status).toBe(200)
-  })
-
-  it("GET /api/v1/health is public and reports the auth state", async () => {
+// ── /api/v1 (retired in issue #40) ───────────────────────────────────────
+// The desktop external REST API (handleApiV1, sole mount of the legacy
+// node:http index.js) was deleted in the thin-client migration. All
+// consumers (MCP server, browser clipper) now speak /api/v2. This block
+// verifies the retirement: every /api/v1 path is a 404 with the v2 error
+// envelope, not the legacy {ok:false, error:"Not found"} envelope.
+describe("/api/v1 retired (issue #40)", () => {
+  it("GET /api/v1/health is now 404 (v2 health is /api/v2/health)", async () => {
     const res = await request(app).get("/api/v1/health")
-    expect(res.status).toBe(200)
-    expect(res.body.ok).toBe(true)
-    expect(res.body.status).toBe("ok")
-    // Fresh store: no token, allowUnauthenticated unset → auth required.
-    expect(res.body.authConfigured).toBe(false)
-    expect(res.body.authRequired).toBe(true)
-  })
-
-  it("GET /api/v1/projects lists registry + marks current", async () => {
-    // No token configured yet: api-v1 denies data reads (desktop contract).
-    const denied = await request(app).get("/api/v1/projects")
-    expect(denied.status).toBe(401)
-    // Configure a token through the shared store (desktop Settings parity).
-    await request(app).put("/api/store/app-state.json").send({ apiConfig: { token: "v1-secret" } })
-    const res = await request(app).get("/api/v1/projects").query({ token: "v1-secret" })
-    expect(res.status).toBe(200)
-    expect(res.body.ok).toBe(true)
-    expect(res.body.projects).toHaveLength(1)
-    expect(res.body.projects[0]).toMatchObject({ id: projectId, current: true })
-  })
-
-  it("GET files + files/content honor the public-path guard", async () => {
-    // Default (recursive) listing is a tree: {name, path, isDir, children}.
-    const files = await request(app)
-      .get(`/api/v1/projects/${projectId}/files`)
-      .query({ token: "v1-secret" })
-    expect(files.status).toBe(200)
-    expect(files.body.ok).toBe(true)
-    const flatten = (nodes) => nodes.flatMap((n) => [n, ...flatten(n.children || [])])
-    expect(flatten(files.body.files).some((f) => f.path === "wiki/concepts/attention.md")).toBe(true)
-
-    const okRead = await request(app)
-      .get(`/api/v1/projects/${projectId}/files/content`)
-      .query({ token: "v1-secret", path: "wiki/concepts/attention.md" })
-    expect(okRead.status).toBe(200)
-    expect(okRead.body.content).toContain("# Attention")
-
-    const guarded = await request(app)
-      .get(`/api/v1/projects/${projectId}/files/content`)
-      .query({ token: "v1-secret", path: "../../secret-env.txt" })
-    expect(guarded.status).toBe(403)
-
-    const badTok = await request(app).get("/api/v1/projects").query({ token: "wrong" })
-    expect(badTok.status).toBe(401)
-  })
-
-  it("env token (LLM_WIKI_API_TOKEN) is honored like the desktop", async () => {
-    process.env.LLM_WIKI_API_TOKEN = "env-token"
-    try {
-      const res = await request(app)
-        .get("/api/v1/projects")
-        .set("Authorization", "Bearer env-token")
-      expect(res.status).toBe(200)
-      const health = await request(app).get("/api/v1/health")
-      expect(health.body.tokenSource).toBe("env")
-    } finally {
-      delete process.env.LLM_WIKI_API_TOKEN
-    }
-  })
-
-  it("unknown endpoint returns the desktop's 404 envelope ('Not found')", async () => {
-    const res = await request(app)
-      .get("/api/v1/nope")
-      .query({ token: "v1-secret" })
     expect(res.status).toBe(404)
-    expect(res.body).toMatchObject({ ok: false, error: "Not found" })
+    expect(res.body.error.code).toBe("NOT_FOUND")
+  })
+
+  it("GET /api/v1/projects is now 404 (use /api/v2/projects)", async () => {
+    const res = await request(app).get("/api/v1/projects").query({ token: "v1-secret" })
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe("NOT_FOUND")
+  })
+
+  it("unknown /api/v1 endpoint is 404 with the v2 envelope", async () => {
+    const res = await request(app).get("/api/v1/nope").query({ token: "v1-secret" })
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe("NOT_FOUND")
   })
 })
