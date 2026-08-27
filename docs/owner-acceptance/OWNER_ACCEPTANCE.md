@@ -104,3 +104,4 @@ Chronological (date-first filenames sort as listed). One row per report file.
 | Date | Report | File | Verdicts | Key links |
 |---|---|---|---|---|
 | 2026-08-05 | Issue #14 production completeness | [2026-08-05_issue-14-production-completeness.md](2026-08-05_issue-14-production-completeness.md) | 5 PASS · 1 PARTIAL · 1 FAIL | [#14](https://github.com/vinvcn/llm_wiki/issues/14) · [#32](https://github.com/vinvcn/llm_wiki/issues/32) · tested [`a42d103`](https://github.com/vinvcn/llm_wiki/commit/a42d103) |
+| 2026-08-27 | Mobile adaptive web UI: full-parity phone shell (<768px) | [2026-08-27_mobile-adaptive-web-ui-full-parity-phone-shell.md](2026-08-27_mobile-adaptive-web-ui-full-parity-phone-shell.md) | 12 PASS | [#44](https://github.com/vinvcn/llm_wiki/issues/44) · [#45](https://github.com/vinvcn/llm_wiki/pull/45) · tested [`aa6594d`](https://github.com/vinvcn/llm_wiki/commit/aa6594d) |
