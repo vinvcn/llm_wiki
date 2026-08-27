@@ -589,7 +589,7 @@ function ZoomControls() {
       <Button
         variant="outline"
         size="icon"
-        className="h-7 w-7 bg-background/80 backdrop-blur-sm"
+        className="h-8 w-8 bg-background/80 backdrop-blur-sm md:h-7 md:w-7"
         onClick={() => {
           const camera = sigma.getCamera()
           camera.animatedZoom({ duration: 200 })
@@ -600,7 +600,7 @@ function ZoomControls() {
       <Button
         variant="outline"
         size="icon"
-        className="h-7 w-7 bg-background/80 backdrop-blur-sm"
+        className="h-8 w-8 bg-background/80 backdrop-blur-sm md:h-7 md:w-7"
         onClick={() => {
           const camera = sigma.getCamera()
           camera.animatedUnzoom({ duration: 200 })
@@ -611,7 +611,7 @@ function ZoomControls() {
       <Button
         variant="outline"
         size="icon"
-        className="h-7 w-7 bg-background/80 backdrop-blur-sm"
+        className="h-8 w-8 bg-background/80 backdrop-blur-sm md:h-7 md:w-7"
         onClick={() => {
           const camera = sigma.getCamera()
           camera.animatedReset({ duration: 300 })
@@ -1164,7 +1164,7 @@ export function GraphView() {
           )}
 
           {showFilters && (
-            <div className="absolute top-3 left-3 w-72 rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur-sm">
+            <div className="absolute top-3 left-3 w-[calc(100%-24px)] max-w-72 rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur-sm md:w-72">
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-1.5 font-semibold text-foreground">
                   <Filter className="h-3.5 w-3.5" />
