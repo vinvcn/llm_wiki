@@ -993,7 +993,7 @@ export function GraphView() {
                     setGraphSearchOpen(false)
                   }
                 }}
-                className="h-7 w-full rounded-md border bg-background pl-7 pr-7 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
+                className="h-7 w-full rounded-md border bg-background pl-7 pr-7 text-[16px] outline-none placeholder:text-muted-foreground focus:border-ring md:text-xs"
                 placeholder={t("graph.searchPlaceholder")}
                 aria-label={t("graph.searchLabel")}
               />

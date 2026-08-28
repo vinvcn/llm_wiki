@@ -38,13 +38,19 @@ export function BottomTabBar({ onMore }: BottomTabBarProps) {
     <nav
       aria-label="Primary"
       data-testid="bottom-tab-bar"
-      className="flex h-[56px] shrink-0 items-center justify-around border-t bg-background px-1 pb-[env(safe-area-inset-bottom)]"
+      className="sticky bottom-0 z-50 flex h-[56px] shrink-0 items-center justify-around border-t bg-background px-1 pb-[env(safe-area-inset-bottom)] touch-manipulation"
     >
       {TABS.map(({ view, icon: Icon, labelKey, testId }) => {
         const isActive = view === "more" ? isMoreActive : activeView === view
         const label = t(labelKey, view === "more" ? "More" : view)
 
         const onClick = () => {
+          // On iOS, the first tap while an input is focused dismisses the keyboard
+          // instead of firing the button's click. Blur the focused input first so
+          // the navigation always lands on the first tap (graph search, chat, etc.).
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur()
+          }
           if (view === "more") {
             onMore()
           } else {

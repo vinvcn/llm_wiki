@@ -16,7 +16,7 @@ function toOpenAIMessages(messages) {
       out.push({
         role: "assistant",
         content: m.content ?? null,
-        tool_calls: m.toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: typeof t.args === "string" ? t.args : JSON.stringify(t.args ?? {}) } })),
+        tool_calls: m.toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: sanitizeToolName(t.name), arguments: typeof t.args === "string" ? t.args : JSON.stringify(t.args ?? {}) } })),
       })
     } else {
       out.push({ role: m.role, content: m.content })
@@ -24,8 +24,33 @@ function toOpenAIMessages(messages) {
   }
   return out
 }
+// Nvidia (and strict OpenAI) validators reject tool names with dots:
+// "Only a-z, A-Z, 0-9, underscores, and dashes are allowed." Our internal
+// tool names use dots (wiki.search, wiki.read_page, etc.) for namespacing.
+// Sanitize on the wire (dots → underscores) and desanitize on receive.
+const TOOL_SANITIZE = {
+  "wiki.search": "wiki_search",
+  "wiki.read_page": "wiki_read_page",
+  "wiki.write_page": "wiki_write_page",
+  "source.search": "source_search",
+  "graph.search": "graph_search",
+  "web.search": "web_search",
+  "anytxt.search": "anytxt_search",
+  "shell.exec": "shell_exec",
+  "workspace.write_file": "workspace_write_file",
+  "workspace.append_file": "workspace_append_file",
+  "llm.generate": "llm_generate",
+}
+const TOOL_DESANITIZE = Object.fromEntries(Object.entries(TOOL_SANITIZE).map(([k, v]) => [v, k]))
+function sanitizeToolName(name) {
+  return TOOL_SANITIZE[name] ?? name.replace(/\./g, "_")
+}
+function desanitizeToolName(name) {
+  return TOOL_DESANITIZE[name] ?? name
+}
+
 function toOpenAITools(tools) {
-  return tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }))
+  return tools.map((t) => ({ type: "function", function: { name: sanitizeToolName(t.name), description: t.description, parameters: t.parameters } }))
 }
 function toAnthropicMessages(messages) {
   const out = []
@@ -41,7 +66,7 @@ function toAnthropicMessages(messages) {
         if (Array.isArray(m.content)) blocks.push(...m.content)
         else blocks.push({ type: "text", text: m.content })
       }
-      for (const t of m.toolCalls) blocks.push({ type: "tool_use", id: t.id, name: t.name, input: typeof t.args === "string" ? safeParse(t.args) : (t.args ?? {}) })
+      for (const t of m.toolCalls) blocks.push({ type: "tool_use", id: t.id, name: sanitizeToolName(t.name), input: typeof t.args === "string" ? safeParse(t.args) : (t.args ?? {}) })
       out.push({ role: "assistant", content: blocks })
     } else {
       // String content stays a string; array content (multimodal blocks,
@@ -53,7 +78,7 @@ function toAnthropicMessages(messages) {
   return out
 }
 function toAnthropicTools(tools) {
-  return tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  return tools.map((t) => ({ name: sanitizeToolName(t.name), description: t.description, input_schema: t.parameters }))
 }
 function safeParse(s) { try { return JSON.parse(s) } catch { return {} } }
 function systemText(messages) {
@@ -105,7 +130,7 @@ async function* streamOpenAI({ url, headers, model, messages, tools, signal, tem
     }
     if (chunk?.choices?.[0]?.finish_reason) {
       for (const [, acc] of [...pending.entries()].sort((a, b) => a[0] - b[0])) {
-        yield { type: "tool_call", id: acc.id || `call_${Math.random().toString(36).slice(2)}`, name: acc.name, args: safeParse(acc.args) }
+        yield { type: "tool_call", id: acc.id || `call_${Math.random().toString(36).slice(2)}`, name: desanitizeToolName(acc.name), args: safeParse(acc.args) }
       }
       pending.clear()
       yield { type: "finish" }
@@ -113,7 +138,7 @@ async function* streamOpenAI({ url, headers, model, messages, tools, signal, tem
   }
   // flush any tool calls if stream ended without finish_reason
   for (const [, acc] of [...pending.entries()].sort((a, b) => a[0] - b[0])) {
-    yield { type: "tool_call", id: acc.id || `call_${Math.random().toString(36).slice(2)}`, name: acc.name, args: safeParse(acc.args) }
+    yield { type: "tool_call", id: acc.id || `call_${Math.random().toString(36).slice(2)}`, name: desanitizeToolName(acc.name), args: safeParse(acc.args) }
   }
 }
 
@@ -139,7 +164,7 @@ async function* streamAnthropic({ url, headers, model, messages, tools, signal, 
       else if (ev.delta?.type === "input_json_delta" && blocks.has(ev.index)) blocks.get(ev.index).args += ev.delta.partial_json ?? ""
     } else if (ev.type === "content_block_stop" && blocks.has(ev.index)) {
       const b = blocks.get(ev.index)
-      yield { type: "tool_call", id: b.id, name: b.name, args: safeParse(b.args) }
+      yield { type: "tool_call", id: b.id, name: desanitizeToolName(b.name), args: safeParse(b.args) }
       blocks.delete(ev.index)
     } else if (ev.type === "message_stop") {
       yield { type: "finish" }
@@ -156,7 +181,7 @@ async function nonStreamOpenAI({ url, headers, model, messages, tools, signal, t
   if (!res.ok) throw new Error(`LLM request failed: ${res.status} ${await res.text().catch(() => "")}`)
   const json = await res.json()
   const msg = json?.choices?.[0]?.message
-  const toolCalls = (msg?.tool_calls ?? []).map((t) => ({ id: t.id, name: t.function.name, args: safeParse(t.function.arguments) }))
+  const toolCalls = (msg?.tool_calls ?? []).map((t) => ({ id: t.id, name: desanitizeToolName(t.function.name), args: safeParse(t.function.arguments) }))
   return { content: msg?.content ?? "", toolCalls }
 }
 
@@ -173,7 +198,7 @@ async function nonStreamAnthropic({ url, headers, model, messages, tools, signal
   const toolCalls = []
   for (const b of json?.content ?? []) {
     if (b.type === "text") content += b.text
-    else if (b.type === "tool_use") toolCalls.push({ id: b.id, name: b.name, args: b.input ?? {} })
+    else if (b.type === "tool_use") toolCalls.push({ id: b.id, name: desanitizeToolName(b.name), args: b.input ?? {} })
   }
   return { content, toolCalls }
 }
